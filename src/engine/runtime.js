@@ -7,6 +7,16 @@ const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(valu
 const bounded = (value, fallback, min, max) => THREE.MathUtils.clamp(finite(value, fallback), min, max);
 const isFinitePoint = p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
 
+export function recordingMimeType() {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function' || typeof HTMLCanvasElement === 'undefined' || !HTMLCanvasElement.prototype.captureStream) return '';
+  return ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(type => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+export function captureFilename(name, extension) {
+  const specimen = (name || 'specimen').replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'specimen';
+  return `${specimen}-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`;
+}
+
 // Percentages map linearly to bounded Three.js light strengths (100% key = 3).
 export const lightingPresets = {
   studio: { label: 'Studio', lightMode: 'directional', lightAngle: 45, lightElevation: 40, lightIntensity: 100, ambientFill: 35, lightTemperature: 'neutral', secondaryFill: false },
@@ -30,6 +40,8 @@ function inspectionMaterial(source, flat = false) {
     material.emissiveMap = null;
     material.lightMap = null;
     material.envMap = null;
+    // Inspection backlighting must not transmit the bright backdrop through glass.
+    if ('transmission' in material) material.transmission = 0;
     return material;
   }
   const material = flat ? new THREE.MeshLambertMaterial() : new THREE.MeshStandardMaterial({ roughness: .85 });
@@ -64,7 +76,7 @@ function disposeObject(root) {
 export function createViewer(host, asset, latest, restore) {
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'low-power' });
+    renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'low-power', preserveDrawingBuffer: true });
   } catch (error) { throw new Error(`WebGL2 is required. ${error.message}`); }
   renderer.setPixelRatio(1);
   renderer.setClearColor(0x191b1d, 1);
@@ -113,8 +125,34 @@ export function createViewer(host, asset, latest, restore) {
   let root, splats, ready = false, dead = false, lost = false, frame = 0, radius = 1;
   let width = 1, height = 1, orthoHeight = 2, dirty = true, lastTime = 0, lastDraw = 0, lastNotify = 0;
   let lastCommandId, hasCommand = false, settings = {}, visible = true;
+  let recording = null, downloadUrl = null, downloadTimer = null;
+  function clearDownload() {
+    clearTimeout(downloadTimer);
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
+  }
+  function recordingState(state) { latest.current.onRecordingChange?.(state); }
+  function releaseRecording(session) {
+    clearInterval(session.timer);
+    session.stream.getTracks().forEach(track => track.stop());
+    session.recorder.ondataavailable = session.recorder.onstop = session.recorder.onerror = null;
+    session.chunks = [];
+    if (recording === session) recording = null;
+  }
+  function cancelRecording(message = '') {
+    const session = recording;
+    if (!session) return;
+    releaseRecording(session);
+    if (session.recorder.state !== 'inactive') {
+      try { session.recorder.stop(); } catch { /* Already stopped by the browser. */ }
+    }
+    recordingState({ status: 'idle', elapsed: 0, error: message });
+  }
   const offset = new THREE.Vector3();
-  const error = e => { if (!dead) latest.current.onError?.(e instanceof Error ? e.message : String(e)); };
+  const error = e => {
+    cancelRecording('Recording stopped because the renderer failed.');
+    if (!dead) latest.current.onError?.(e instanceof Error ? e.message : String(e));
+  };
   const changed = () => { dirty = true; };
   controls.addEventListener('change', changed);
   renderer.debug.onShaderError = (gl, program) => {
@@ -202,7 +240,7 @@ export function createViewer(host, asset, latest, restore) {
         object.receiveShadow = !flat;
         for (const m of [object.material].flat()) {
           const clipping = !!settings.clipEnabled;
-          if (!!m.clippingPlanes !== clipping) { m.clippingPlanes = clipping ? [plane] : null; m.needsUpdate = true; }
+          if (!!m.clippingPlanes !== clipping) { m.clippingPlanes = clipping ? [plane] : null; m.clipShadows = clipping; m.needsUpdate = true; }
         }
       });
       plane.constant = center.x + bounded(settings.clipOffset, 0, -1, 1) * size.x / 2;
@@ -254,18 +292,20 @@ export function createViewer(host, asset, latest, restore) {
     positionLights();
     if (splats) {
       splats.update();
-      if (dirty || splats.shouldRender()) splats.render();
+      if (dirty || recording || splats.shouldRender()) splats.render();
       splats.renderNextFrame = false;
     } else renderer.render(scene, camera);
   }
   function tick(time) {
     if (dead) return;
     frame = requestAnimationFrame(tick);
-    if (!ready || lost || !visible || document.hidden || time - lastDraw < 32) return;
+    const interval = recording ? 1000 / recording.fps : 32;
+    if (!ready || lost || !visible || document.hidden || time - lastDraw < interval - (recording ? 1 : 0)) return;
     const delta = Math.min((time - lastTime) / 1000 || 0, .1);
     lastTime = time;
-    lastDraw = time;
-    if (settings.spin && asset.kind !== 'mesh') {
+    // Carry the remainder so 24 FPS does not fall to 20 on a 60 Hz display.
+    lastDraw = recording ? time - Math.max(0, (time - lastDraw) % interval) : time;
+    if (recording ? recording.turntable : settings.spin && asset.kind !== 'mesh') {
       offset.copy(camera.position).sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * bounded(settings.speed, 1, -10, 10) * .3);
       camera.position.copy(controls.target).add(offset);
       camera.lookAt(controls.target);
@@ -274,7 +314,7 @@ export function createViewer(host, asset, latest, restore) {
     controls.update();
     const notify = dirty;
     try {
-      if (dirty || splats) draw();
+      if (dirty || splats || recording) draw();
     } catch (e) {
       ready = false;
       error(new Error(`Rendering stopped: ${e.message}`));
@@ -340,6 +380,8 @@ export function createViewer(host, asset, latest, restore) {
           root = gltf.scene;
           faces = 0;
           root.traverse(object => {
+            // Authored glTF lights would bypass flat and zero-fill inspection modes.
+            if (object.isLight) object.visible = false;
             if (!object.isMesh) return;
             const geometry = object.geometry;
             vertices += geometry.attributes.position?.count || 0;
@@ -388,7 +430,7 @@ export function createViewer(host, asset, latest, restore) {
   async function capture() {
     if (!ready || dead || lost) throw new Error('Wait for the asset to finish loading before capturing.');
     try {
-      // Rendering immediately before readback avoids preserveDrawingBuffer's persistent GPU memory cost.
+      // Render immediately so screenshots include the latest settings and camera.
       dirty = true;
       draw();
       const dataURL = canvas.toDataURL('image/png');
@@ -400,8 +442,67 @@ export function createViewer(host, asset, latest, restore) {
     }
   }
 
+  function startRecording({ fps = 30, turntable = true } = {}) {
+    if (!ready || dead || lost || !visible) throw new Error('Wait for a visible, loaded specimen before recording.');
+    if (recording) throw new Error('A recording is already in progress.');
+    const mimeType = recordingMimeType();
+    if (!mimeType) throw new Error('This browser cannot record WebM from a canvas. Try a browser with MediaRecorder and WebM support.');
+    if (![15, 24, 30].includes(fps)) throw new Error('Choose 15, 24, or 30 FPS.');
+    let stream;
+    try {
+      clearDownload();
+      dirty = true;
+      draw();
+      stream = canvas.captureStream(fps);
+      const recorder = new MediaRecorder(stream, { mimeType });
+      const session = { recorder, stream, fps, turntable, chunks: [], started: performance.now(), timer: null };
+      recording = session;
+      recorder.ondataavailable = event => { if (event.data.size) session.chunks.push(event.data); };
+      recorder.onerror = event => cancelRecording(`WebM recording failed: ${event.error?.message || 'The browser encoder stopped.'}`);
+      recorder.onstop = () => {
+        const blob = new Blob(session.chunks, { type: recorder.mimeType || mimeType });
+        releaseRecording(session);
+        try {
+          if (!blob.size) throw new Error('The browser produced an empty video. Record for longer and try again.');
+          downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = captureFilename(asset.name, 'webm');
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          downloadTimer = setTimeout(clearDownload, 1000);
+          recordingState({ status: 'idle', elapsed: 0, saved: true });
+        } catch (e) {
+          clearDownload();
+          recordingState({ status: 'idle', elapsed: 0, error: `WebM save failed: ${e.message}` });
+        }
+      };
+      recorder.start(1000);
+      lastTime = performance.now();
+      session.timer = setInterval(() => recordingState({ status: recorder.state === 'inactive' ? 'stopping' : 'recording', elapsed: performance.now() - session.started }), 250);
+      recordingState({ status: 'recording', elapsed: 0 });
+      dirty = true;
+    } catch (e) {
+      cancelRecording();
+      stream?.getTracks().forEach(track => track.stop());
+      throw new Error(`Could not start WebM recording: ${e.message}`);
+    }
+  }
+
+  function stopRecording() {
+    if (!recording || recording.recorder.state === 'inactive') return;
+    const session = recording;
+    clearInterval(session.timer);
+    recordingState({ status: 'stopping', elapsed: performance.now() - session.started });
+    try { session.recorder.stop(); }
+    catch (e) { cancelRecording(`Could not finish WebM recording: ${e.message}`); }
+  }
+
   function dispose() {
     if (dead) return;
+    cancelRecording('Recording cancelled because the specimen or viewport changed.');
+    clearDownload();
     dead = true;
     ready = false;
     abort.abort();
@@ -420,5 +521,5 @@ export function createViewer(host, asset, latest, restore) {
     if (splats) Promise.resolve(splats.dispose()).catch(() => {}).finally(finish);
     else finish();
   }
-  return { load, applySettings, command, capture, dispose };
+  return { load, applySettings, command, capture, startRecording, stopRecording, cancelRecording, dispose };
 }

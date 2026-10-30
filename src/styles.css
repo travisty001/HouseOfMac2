@@ -10,7 +10,10 @@
 
 /* Inspection controls: compact hierarchy, clear labels and quiet, purposeful color. */
 button,.header-import,.original-download,.external-link{font-weight:650}
-button strong,button span,button small,button kbd{font-weight:inherit}
+button strong,button span,button small,button kbd{font-weight:650}
+button kbd{font-size:11px}
+.sample-button small,.comparison-file small,.import-zone strong{font-weight:650}
+.source-select{font-weight:600}
 .nav-item,.header-import,.toolbar-spin,.segmented button,.camera-views button,.inline-action,
 .primary-button,.secondary-button,.text-button,.viewer-error button,.sample-button strong,
 .comparison-file strong,.original-download,.external-link,.source-select{font-size:11px}
@@ -81,3 +84,14 @@ button:active:not(:disabled){transform:translateY(1px)}
   .lighting-description,.quiet-note,.lighting-note{font-size:12px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}button:active:not(:disabled){transform:none}}
+
+.video-fps{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:#c3cecd;font-weight:600;margin-bottom:10px}
+.video-fps select{width:112px}
+.video-options{border:0;padding:0;margin:0;min-width:0}
+.video-options:disabled{opacity:.6}
+.recording-timer{font:13px var(--mono);font-variant-numeric:tabular-nums;color:#b9c8c9}
+.recording-timer.running{color:var(--coral)}
+.recording-stop{border-color:var(--coral);color:#f0c6bd;margin-top:12px}
+.video-capture>.primary-button{margin-top:12px}
+.video-capture>.quiet-note{margin-bottom:0}
+.capture-error{font-size:12px;color:#f0b9ae;line-height:1.6;overflow-wrap:anywhere}

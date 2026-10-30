@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowLeftRight, ArrowUpRight, Box, Camera, Check, Crosshair, FolderOpen, Image, Keyboard, Layers, MousePointer2, Move3D, Plus, RotateCcw, ScanLine, Settings2, Upload, X } from 'lucide-react';
 import Viewer from './engine/Viewer';
-import { lightingPresets } from './engine/runtime.js';
+import { captureFilename, lightingPresets, recordingMimeType } from './engine/runtime.js';
 
 const defaults = { appearance: 'original', lightingPreset: 'studio', ...lightingPresets.studio, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, speed: 0.3, orthographic: false };
 const samples = [{ url: '/final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: '/3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
@@ -85,6 +85,17 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [commands, setCommands] = useState([null, null]);
+  const [fps, setFps] = useState(30);
+  const [autoTurntable, setAutoTurntable] = useState(true);
+  const [recording, setRecording] = useState({ status: 'idle', elapsed: 0 });
+  const [recordingError, setRecordingError] = useState('');
+  const recording0 = useRef(null), recording1 = useRef(null);
+  const recordingRefs = [recording0, recording1];
+  const previousActive = useRef(active);
+  const videoSupported = !!recordingMimeType();
+  const isRecording = recording.status !== 'idle';
+  const elapsedSeconds = Math.floor(recording.elapsed / 1000);
+  const elapsedLabel = `${String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:${String(elapsedSeconds % 60).padStart(2, '0')}`;
   const inputRef = useRef(null);
   const capture0 = useRef(null), capture1 = useRef(null);
   const assetRef = useRef(assets);
@@ -95,6 +106,25 @@ export default function App() {
   const capabilities = metadata[active]?.capabilities || {};
   const canOrtho = asset?.kind === 'mesh' && capabilities.orthographic !== false;
   const canSpin = asset?.kind !== 'mesh' && capabilities.spin !== false;
+  useEffect(() => {
+    if (previousActive.current !== active) {
+      (previousActive.current === 0 ? recording0 : recording1).current?.cancel();
+      previousActive.current = active;
+    }
+  }, [active]);
+  const onRecordingChange = useCallback(state => {
+    setRecording(state);
+    setRecordingError(state.error || '');
+    if (state.saved) setNotice('WebM video saved locally.');
+  }, []);
+  const startRecording = () => {
+    setRecordingError('');
+    try {
+      const api = recordingRefs[active].current;
+      if (!api) throw new Error('Wait for the specimen to finish loading before recording.');
+      api.start({ fps, turntable: autoTurntable });
+    } catch (error) { setRecordingError(error.message); }
+  };
   useEffect(() => {
     const live = new Set(assets.flatMap(a => a?.objectUrls || []));
     assetRef.current.flatMap(a => a?.objectUrls || []).forEach(url => { if (!live.has(url)) URL.revokeObjectURL(url); });
@@ -125,7 +155,13 @@ export default function App() {
     const handler = active === 0 ? capture0.current : capture1.current;
     if (!handler) { setNotice('Wait for the renderer to finish loading before capturing.'); return; }
     try {
-      await handler();
+      const dataURL = await handler();
+      const link = document.createElement('a');
+      link.href = dataURL;
+      link.download = captureFilename(assets[active]?.name, 'png');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
       setNotice('PNG capture saved.');
     } catch (error) { setNotice(`Capture failed: ${error.message}`); }
   }, [active, assets]);
@@ -154,7 +190,7 @@ export default function App() {
         <div className="viewports">{(compare ? [0, 1] : [active]).map(slot => <section key={slot} className={`viewport ${active === slot ? 'active-view' : ''}`} onPointerDown={() => setActive(slot)} aria-label={`Viewport ${slot + 1}`}>
           {assets[slot] ? <>
             <div className="viewport-label"><span className="view-index">{String(slot + 1).padStart(2, '0')}</span><span>{assets[slot].name}</span><span className="type-label">{kindLabel[assets[slot].kind]}</span></div>
-            <div className="renderer"><Viewer key={assets[slot].url} asset={assets[slot]} settings={settings[slot]} cameraCommand={commands[slot]} captureRef={captureRefs[slot]} onReady={info => onReady(slot, info)} onError={error => onError(slot, error)} /></div>
+            <div className="renderer"><Viewer key={assets[slot].url} asset={assets[slot]} settings={settings[slot]} cameraCommand={commands[slot]} captureRef={captureRefs[slot]} recordingRef={recordingRefs[slot]} onRecordingChange={onRecordingChange} onReady={info => onReady(slot, info)} onError={error => onError(slot, error)} /></div>
             {!ready[slot] && !errors[slot] && <div className="loading-overlay"><span className="loading-line" />Preparing specimen</div>}
             {errors[slot] && <div className="viewer-error"><Box size={25} /><strong>Unable to render this file</strong><p>{errors[slot]}</p><button onClick={() => chooseFile(slot)}>Choose another file</button></div>}
             <div className="viewport-bottom"><span>{settings[slot].orthographic && assets[slot].kind === 'mesh' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE'}</span><span>{settings[slot].spin ? 'TURNTABLE ACTIVE' : 'ORBIT / FREE'}</span></div>
@@ -182,6 +218,16 @@ export default function App() {
             <div className="section-intro"><h1>Keep the observation.</h1><p>Save the selected viewport at its current rendering resolution.</p></div>
             <div className="capture-summary"><Image size={28} strokeWidth={1.2} /><span>PNG image<small>{compare ? `Viewport 0${active + 1}` : 'Current viewport'} · Current camera</small></span></div>
             <button className="primary-button full-width" disabled={!ready[active]} onClick={capture}><ArrowDownToLine size={16} />Save screenshot<kbd>S</kbd></button>
+            <section className="tool-section video-capture" aria-label="WebM video recording">
+              <div className="section-title"><h2>WebM video</h2><span className={`recording-timer ${isRecording ? 'running' : ''}`} role="timer" aria-label="Recording elapsed time">{elapsedLabel}</span></div>
+              <label className="video-fps">Frame rate<select className="lighting-select" value={fps} disabled={isRecording} onChange={e => setFps(Number(e.target.value))}>{[15, 24, 30].map(value => <option key={value} value={value}>{value} FPS</option>)}</select></label>
+              <fieldset className="video-options" disabled={isRecording}><Toggle label="Auto-turntable" checked={autoTurntable} onChange={setAutoTurntable} /></fieldset>
+              {autoTurntable && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}
+              {isRecording ? <button className="secondary-button full-width recording-stop" disabled={recording.status === 'stopping'} onClick={() => recordingRefs[active].current?.stop()}>{recording.status === 'stopping' ? 'Finishing WebM…' : 'Stop & save WebM'}</button> : <button className="primary-button full-width" disabled={!ready[active] || !videoSupported} onClick={startRecording}>Start WebM recording</button>}
+              {!videoSupported && <p className="capture-error" role="alert">This browser does not support canvas recording with WebM. Try a browser with MediaRecorder and WebM support.</p>}
+              {recordingError && <p className="capture-error" role="alert">{recordingError}</p>}
+              <p className="quiet-note">Local recording only · No upload. Keep this tab visible while recording. Changing specimens or viewports cancels the recording.</p>
+            </section>
             <section className="tool-section"><h2>Frame the specimen</h2><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{canSpin && <Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}</section>
             <p className="info-note">The image records the rendered view. Original geometry and source files are never modified.</p>
           </> : <>

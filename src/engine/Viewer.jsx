@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { createViewer } from './runtime.js';
 
 /** One local WebGL context. The parent must provide a nonzero height. */
-export default function Viewer({ asset, settings = {}, onReady, onError, onCameraChange, cameraCommand, captureRef }) {
+export default function Viewer({ asset, settings = {}, onReady, onError, onCameraChange, onRecordingChange, cameraCommand, captureRef, recordingRef }) {
   const host = useRef(null);
   const runtime = useRef(null);
-  const latest = useRef({ settings, onReady, onError, onCameraChange, cameraCommand });
-  latest.current = { settings, onReady, onError, onCameraChange, cameraCommand };
+  const latest = useRef({ settings, onReady, onError, onCameraChange, onRecordingChange, cameraCommand });
+  latest.current = { settings, onReady, onError, onCameraChange, onRecordingChange, cameraCommand };
   const [generation, restart] = useState(0);
 
   useEffect(() => {
@@ -36,6 +36,19 @@ export default function Viewer({ asset, settings = {}, onReady, onError, onCamer
     captureRef.current = capture;
     return () => { if (captureRef.current === capture) captureRef.current = null; };
   }, [captureRef]);
+  useEffect(() => {
+    if (!recordingRef) return undefined;
+    const api = {
+      start: options => {
+        if (!runtime.current) throw new Error('Wait for the specimen to finish loading before recording.');
+        runtime.current.startRecording(options);
+      },
+      stop: () => runtime.current?.stopRecording(),
+      cancel: () => runtime.current?.cancelRecording('Recording cancelled because the selected viewport changed.'),
+    };
+    recordingRef.current = api;
+    return () => { if (recordingRef.current === api) recordingRef.current = null; };
+  }, [recordingRef]);
 
   return <div ref={host} data-engine="viewer" style={{ width: '100%', height: '100%', minHeight: 0, overflow: 'hidden', position: 'relative', background: '#191b1d' }} />;
 }
