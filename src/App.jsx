@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowLeftRight, ArrowUpRight, Box, Camera, Check, Crosshair, FolderOpen, Image, Keyboard, Layers, MousePointer2, Move3D, Plus, RotateCcw, ScanLine, Settings2, Upload, X } from 'lucide-react';
 import Viewer from './engine/Viewer';
+import { lightingPresets } from './engine/runtime.js';
 
-const defaults = { appearance: 'original', raking: false, lightAngle: 45, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, speed: 0.3, orthographic: false };
+const defaults = { appearance: 'original', lightingPreset: 'studio', ...lightingPresets.studio, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, speed: 0.3, orthographic: false };
 const samples = [{ url: '/final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: '/3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
 const kindLabel = { mesh: 'Mesh', splat: 'Gaussian splat', points: 'Point cloud' };
 const bytes = n => n == null ? 'Reference asset' : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
@@ -10,6 +11,34 @@ const bytes = n => n == null ? 'Reference asset' : n < 1048576 ? `${(n / 1024).t
 function IconButton({ icon: Icon, label, ...props }) { return <button className="icon-button" title={label} aria-label={label} {...props}><Icon size={17} strokeWidth={1.6} /></button>; }
 function Toggle({ label, checked, onChange, detail }) { return <label className="toggle-row"><span>{label}{detail && <small>{detail}</small>}</span><input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} /><span className="switch" /></label>; }
 function Range({ label, value, onChange, min, max, step = 1, suffix = '' }) { return <label className="range-field"><span>{label}<output>{Number(value).toFixed(step < 0.01 ? 3 : step < 1 ? 2 : 0)}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} /></label>; }
+
+function LightingRig({ settings, onChange }) {
+  const custom = settings.lightingPreset === 'custom';
+  const change = (key, value) => onChange({ [key]: value, lightingPreset: 'custom', raking: false });
+  const selectPreset = value => onChange(value === 'custom' ? { lightingPreset: 'custom' } : { ...lightingPresets[value], lightingPreset: value, raking: false });
+  const flat = settings.lightMode === 'flat', backlight = settings.lightMode === 'backlight';
+  return <section className="tool-section lighting-rig" aria-label="Mesh lighting rig">
+    <div className="section-title"><h2>Lighting rig</h2><span className="subtle-label">LIVE · MESH</span></div>
+    <div className="lighting-preset-row"><select aria-label="Lighting preset" className="lighting-select" value={settings.lightingPreset} onChange={e => selectPreset(e.target.value)}>
+      {Object.entries(lightingPresets).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}<option value="custom">Custom</option>
+    </select>{!custom && <button className="lighting-adjust" onClick={() => selectPreset('custom')}>Adjust</button>}</div>
+    <p className="lighting-description">{flat ? 'Uniform, shadowless diffuse inspection.' : backlight ? 'Backlight with zero front fill. Follows your view.' : settings.secondaryFill ? 'Opposing keys reveal detail from both sides.' : settings.lightingPreset === 'raking' ? 'Low grazing light reveals surface relief.' : 'Balanced key and ambient surface illumination.'}</p>
+    {custom && <div className="lighting-advanced">
+      <label className="lighting-mode">Distribution<select className="lighting-select" value={settings.lightMode} onChange={e => {
+        const mode = e.target.value;
+        onChange({ ...lightingPresets[mode === 'flat' ? 'flat' : mode === 'backlight' ? 'silhouette' : 'studio'], lightingPreset: 'custom' });
+      }}><option value="directional">Directional</option><option value="flat">Shadowless flat</option><option value="backlight">Backlight</option></select></label>
+      {!flat && <><Range label="Azimuth" value={settings.lightAngle} min={0} max={360} suffix="°" onChange={v => change('lightAngle', v)} />
+        <Range label="Elevation" value={settings.lightElevation} min={0} max={90} suffix="°" onChange={v => change('lightElevation', v)} />
+        <Range label="Key intensity" value={settings.lightIntensity} min={0} max={200} suffix="%" onChange={v => change('lightIntensity', v)} /></>}
+      {!backlight && <Range label="Ambient fill" value={settings.ambientFill} min={0} max={100} suffix="%" onChange={v => change('ambientFill', v)} />}
+      <div className="lighting-temperature"><span>Temperature</span><div className="segmented" role="group" aria-label="Light color temperature">{['warm', 'neutral', 'cool'].map(value => <button key={value} aria-pressed={settings.lightTemperature === value} className={settings.lightTemperature === value ? 'selected' : ''} onClick={() => change('lightTemperature', value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div></div>
+      {!flat && !backlight && <Toggle label="Opposing fill" detail="Secondary directional light · 65% of key" checked={settings.secondaryFill} onChange={v => change('secondaryFill', v)} />}
+    </div>}
+    {settings.appearance === 'wireframe' && <p className="lighting-note">Wire shows lit edges only; use Neutral to inspect surface relief.</p>}
+    {settings.appearance === 'original' && <p className="quiet-note">Captured texture may contain baked lighting. Use Neutral for relief.</p>}
+  </section>;
+}
 
 async function readAsset(file, companions) {
   const ext = file.name.split('.').pop().toLowerCase();
@@ -73,6 +102,7 @@ export default function App() {
   }, [assets]);
   useEffect(() => () => assetRef.current.flatMap(a => a?.objectUrls || []).forEach(url => URL.revokeObjectURL(url)), []);
   const update = (key, value) => setSettings(previous => previous.map((s, i) => i === active ? { ...s, [key]: value } : s));
+  const updateLighting = patch => setSettings(previous => previous.map((s, i) => i === active ? { ...s, ...patch } : s));
   const command = useCallback(action => setCommands(previous => previous.map((c, i) => i === active ? { id: ++sequence.current, action } : c)), [active]);
   const install = (next, slot = active) => {
     setAssets(previous => previous.map((a, i) => i === slot ? { ...next } : a));
@@ -87,7 +117,7 @@ export default function App() {
     const file = files.find(f => /\.(glb|gltf|ply|splat|ksplat)$/i.test(f.name));
     if (!file) { setNotice('Choose a GLB, GLTF, PLY, SPLAT, or KSPLAT file.'); return; }
     setBusy(true);
-    try { install(await readAsset(file, files), slot); } catch (error) { setNotice(error.message); }
+    try { const next = await readAsset(file, files); install(next, slot); setNotice(`Imported ${next.name}`); } catch (error) { setNotice(error.message); }
     finally { setBusy(false); if (inputRef.current) inputRef.current.value = ''; }
   };
   const chooseFile = (slot = active) => { targetRef.current = slot; inputRef.current?.click(); };
@@ -111,12 +141,12 @@ export default function App() {
   }, [active, capture, command, canSpin]);
   const onReady = useCallback((slot, info) => { setMetadata(p => p.map((m, i) => i === slot ? info : m)); setReady(p => p.map((r, i) => i === slot ? true : r)); setErrors(p => p.map((e, i) => i === slot ? '' : e)); }, []);
   const onError = useCallback((slot, error) => { setErrors(p => p.map((e, i) => i === slot ? String(error) : e)); setReady(p => p.map((r, i) => i === slot ? false : r)); }, []);
-  return <div className="app-shell">
+  return <div className={`app-shell ${busy ? 'is-importing' : ''}`}>
     <input ref={inputRef} type="file" multiple accept=".glb,.gltf,.ply,.splat,.ksplat,.bin,.png,.jpg,.jpeg,.webp,.ktx2" hidden onChange={e => importFiles(e.target.files)} />
     <header className="app-header">
       <a className="brand" href="#" onClick={e => e.preventDefault()} aria-label="House of Mac home"><span className="brand-symbol"><Box size={23} strokeWidth={1.4} /></span><span>HOUSE OF MAC<span className="brand-version">2.0 / FIELD STUDIO</span></span></a>
       <nav aria-label="Workspace">{[{ label: 'Import', icon: FolderOpen }, { label: 'Inspect', icon: ScanLine }, { label: 'Compare', icon: ArrowLeftRight }, { label: 'Capture', icon: Camera }].map(({ label, icon: Icon }) => <button key={label} className={tab === label ? 'nav-item selected' : 'nav-item'} onClick={() => setTab(label)}><Icon size={16} /><span>{label}</span></button>)}</nav>
-      <button className="header-import" onClick={() => chooseFile()} disabled={busy}><Plus size={16} /><span>Import file</span></button>
+      <button className="header-import" onClick={() => chooseFile()} disabled={busy}><Plus size={16} /><span>{busy ? 'Reading…' : 'Import file'}</span></button>
     </header>
     <div className="workspace">
       <main className={`stage ${compare ? 'is-comparing' : ''} ${dragging ? 'dragging' : ''}`} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }} onDrop={e => { e.preventDefault(); setDragging(false); importFiles(e.dataTransfer.files, active); }}>
@@ -131,7 +161,7 @@ export default function App() {
           </> : <div className="empty-view"><div className="empty-icon"><Plus size={25} strokeWidth={1} /></div><h2>A second perspective.</h2><p>Open another scan to compare geometry,<br />surface detail, or capture methods.</p><button className="primary-button" onClick={() => chooseFile(slot)}><FolderOpen size={16} />Import comparison</button><button className="text-button" onClick={() => install(samples[1], slot)}>Use Gaussian reference <ArrowUpRight size={14} /></button></div>}
         </section>)}</div>
         {dragging && <div className="drop-overlay"><Upload size={30} /><strong>Drop to inspect</strong><span>Your original stays on this device.</span></div>}
-        <div className="stage-toolbar"><div><IconButton icon={Crosshair} label="Fit specimen (F)" onClick={() => command('reset')} /><IconButton icon={RotateCcw} label="Rotate camera left" onClick={() => command('step-left')} />{canOrtho && <IconButton icon={Move3D} label={current.orthographic ? 'Use perspective projection' : 'Use orthographic projection'} aria-pressed={current.orthographic} onClick={() => update('orthographic', !current.orthographic)} />}</div>{canSpin && <><span className="toolbar-divider" /><button className={`toolbar-spin ${current.spin ? 'on' : ''}`} onClick={() => update('spin', !current.spin)} title="Turntable (Space)"><span className="spin-indicator" />Turntable</button></>}<span className="toolbar-divider" /><IconButton icon={Camera} label="Save PNG (S)" onClick={capture} disabled={!ready[active]} /></div>
+        <div className="stage-toolbar"><div><IconButton icon={Crosshair} label="Fit specimen (F)" onClick={() => command('reset')} /><IconButton icon={RotateCcw} label="Rotate camera left" onClick={() => command('step-left')} />{canOrtho && <IconButton icon={Move3D} label={current.orthographic ? 'Use perspective projection' : 'Use orthographic projection'} aria-pressed={current.orthographic} onClick={() => update('orthographic', !current.orthographic)} />}</div>{canSpin && <><span className="toolbar-divider" /><button className={`toolbar-spin ${current.spin ? 'on' : ''}`} onClick={() => update('spin', !current.spin)} aria-pressed={current.spin} title="Turntable (Space)"><span className="spin-indicator" />Turntable</button></>}<span className="toolbar-divider" /><IconButton icon={Camera} label="Save PNG (S)" onClick={capture} disabled={!ready[active]} /></div>
         <div className="navigation-hint"><MousePointer2 size={12} /><span>Drag to orbit<span className="hint-extra"> · Right-drag to pan · Scroll to zoom</span></span></div>
       </main>
       <aside className="tool-panel" aria-label={`${tab} tools`}>
@@ -157,7 +187,8 @@ export default function App() {
           </> : <>
             <div className="asset-summary"><div className="section-title"><span className="mode-tag">{kindLabel[asset?.kind] || 'No asset'}</span><span className="subtle-label">VIEW 0{active + 1}</span></div><h1 title={asset?.name}>{asset?.name || 'Open a specimen'}</h1><span className="asset-meta">{bytes(asset?.size)}<span>·</span>{asset?.source}</span></div>
             {asset && <>
-              <section className="tool-section"><h2>Surface display</h2>{asset.kind === 'mesh' ? <><div className="segmented">{[['original', 'Texture'], ['clay', 'Neutral'], ['wireframe', 'Wire']].map(([value, label]) => <button key={value} className={current.appearance === value ? 'selected' : ''} onClick={() => update('appearance', value)}>{label}</button>)}</div><Toggle label="Raking light" checked={current.raking} onChange={v => update('raking', v)} />{current.raking && <Range label="Light angle" value={current.lightAngle} min={0} max={360} suffix="°" onChange={v => update('lightAngle', v)} />}</> : asset.kind === 'splat' ? <><Toggle label="Point cloud" detail="Inspect Gaussian centers" checked={current.pointCloud} onChange={v => update('pointCloud', v)} /><Range label="Splat scale" min={0.1} max={5} step={0.05} value={current.splatScale} suffix="×" onChange={v => update('splatScale', v)} /></> : <Range label="Point size" min={0.1} max={20} step={0.1} suffix=" px" value={current.pointSize} onChange={v => update('pointSize', v)} />}</section>
+              <section className="tool-section"><h2>Surface display</h2>{asset.kind === 'mesh' ? <><div className="segmented">{[['original', 'Texture'], ['clay', 'Neutral'], ['wireframe', 'Wire']].map(([value, label]) => <button key={value} aria-pressed={current.appearance === value} className={current.appearance === value ? 'selected' : ''} onClick={() => update('appearance', value)}>{label}</button>)}</div></> : asset.kind === 'splat' ? <><Toggle label="Point cloud" detail="Inspect Gaussian centers" checked={current.pointCloud} onChange={v => update('pointCloud', v)} /><Range label="Splat scale" min={0.1} max={5} step={0.05} value={current.splatScale} suffix="×" onChange={v => update('splatScale', v)} /></> : <Range label="Point size" min={0.1} max={20} step={0.1} suffix=" px" value={current.pointSize} onChange={v => update('pointSize', v)} />}</section>
+              {asset.kind === 'mesh' && <LightingRig settings={current} onChange={updateLighting} />}
               <section className="tool-section"><div className="section-title"><h2>Camera</h2><button className="inline-action" onClick={() => command('reset')}>Fit <kbd>F</kbd></button></div><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{canSpin && <Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}{current.spin && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}</section>
               {asset.kind === 'mesh' && <section className="tool-section"><h2>Section plane</h2><Toggle label="Clip geometry" checked={current.clipEnabled} onChange={v => update('clipEnabled', v)} />{current.clipEnabled && <Range label="Plane offset" min={-1} max={1} step={0.01} value={current.clipOffset} onChange={v => update('clipOffset', v)} />}</section>}
               <section className="tool-section provenance"><h2>Source & integrity</h2><dl><div><dt>Source</dt><dd>{asset.sample ? asset.source : <select aria-label="File provenance" className="source-select" value={asset.source} onChange={e => setAssets(previous => previous.map((a, i) => i === active ? { ...a, source: e.target.value } : a))}><option>Local file</option><option>KIRI Engine export</option></select>}</dd></div><div><dt>Format</dt><dd>{asset.name.split('.').pop().toUpperCase()}</dd></div>{metadata[active]?.vertices != null && <div><dt>{asset.kind === 'mesh' ? 'Vertices' : 'Points'}</dt><dd>{Number(metadata[active].vertices).toLocaleString()}</dd></div>}{metadata[active]?.faces != null && <div><dt>Faces</dt><dd>{Number(metadata[active].faces).toLocaleString()}</dd></div>}</dl><p><Check size={12} />Original file preserved</p><a className="original-download" href={asset.originalUrl || asset.url} download={asset.name}><ArrowDownToLine size={12} />Download original</a><span className="quiet-note">Uncalibrated capture. Physical dimensions cannot be inferred.</span></section>
@@ -167,7 +198,7 @@ export default function App() {
         <div className="panel-footer"><Keyboard size={13} className="keyboard-symbol" /><span><kbd>F</kbd> fit{canSpin && <><span className="shortcut-gap" /><kbd>Space</kbd> spin</>}<span className="shortcut-gap" /><kbd>S</kbd> save</span></div>
       </aside>
     </div>
-    <footer className="status-bar"><span className="status-message" role="status"><span className={`status-dot ${errors[active] ? 'error' : ''}`} />{busy ? 'Reading local file…' : errors[active] ? 'Renderer needs attention' : ready[active] ? 'Ready to inspect' : 'Preparing viewport'}</span><span className="status-center">{asset ? kindLabel[asset.kind] : 'No specimen'}<span className="status-separator">/</span>NON-DESTRUCTIVE SESSION</span><span className="status-right">HOUSE OF MAC <span className="status-separator">/</span> 02</span></footer>
+    <footer className="status-bar"><span className="status-message" role="status"><span className={`status-dot ${errors[active] ? 'error' : busy || !ready[active] ? 'working' : 'ready'}`} />{busy ? 'Reading local file…' : errors[active] ? 'Renderer needs attention' : ready[active] ? 'Ready to inspect' : 'Preparing viewport'}</span><span className="status-center">{asset ? kindLabel[asset.kind] : 'No specimen'}<span className="status-separator">/</span>NON-DESTRUCTIVE SESSION</span><span className="status-right">HOUSE OF MAC <span className="status-separator">/</span> 02</span></footer>
     {notice && <div className="toast" role="status"><span>{notice}</span><IconButton icon={X} label="Dismiss notification" onClick={() => setNotice('')} /></div>}
   </div>;
 }

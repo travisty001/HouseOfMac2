@@ -7,11 +7,43 @@ const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(valu
 const bounded = (value, fallback, min, max) => THREE.MathUtils.clamp(finite(value, fallback), min, max);
 const isFinitePoint = p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
 
+// Percentages map linearly to bounded Three.js light strengths (100% key = 3).
+export const lightingPresets = {
+  studio: { label: 'Studio', lightMode: 'directional', lightAngle: 45, lightElevation: 40, lightIntensity: 100, ambientFill: 35, lightTemperature: 'neutral', secondaryFill: false },
+  raking: { label: 'Raking', lightMode: 'directional', lightAngle: 80, lightElevation: 8, lightIntensity: 130, ambientFill: 8, lightTemperature: 'neutral', secondaryFill: false },
+  cross: { label: 'Cross-light', lightMode: 'directional', lightAngle: 65, lightElevation: 25, lightIntensity: 100, ambientFill: 15, lightTemperature: 'neutral', secondaryFill: true },
+  silhouette: { label: 'Silhouette', lightMode: 'backlight', lightAngle: 180, lightElevation: 0, lightIntensity: 130, ambientFill: 0, lightTemperature: 'neutral', secondaryFill: false },
+  flat: { label: 'Flat', lightMode: 'flat', lightAngle: 45, lightElevation: 40, lightIntensity: 100, ambientFill: 100, lightTemperature: 'neutral', secondaryFill: false },
+};
+
+export function resolveLighting(settings = {}) {
+  const preset = lightingPresets[settings.lightingPreset] || (settings.raking ? lightingPresets.raking : lightingPresets.studio);
+  return { ...preset, ...Object.fromEntries(Object.keys(preset).filter(key => key !== 'label' && settings[key] !== undefined).map(key => [key, settings[key]])) };
+}
+
+// Ambient-only Lambert diffuse has no normal-dependent shading, even on metallic sources.
+// Keep the original albedo, alpha and vertex colors; omit baked AO and emissive light.
+function inspectionMaterial(source, flat = false) {
+  if (!flat && !source.isMeshBasicMaterial) {
+    const material = source.clone();
+    if (material.emissive) material.emissive.set(0x000000);
+    material.emissiveMap = null;
+    material.lightMap = null;
+    material.envMap = null;
+    return material;
+  }
+  const material = flat ? new THREE.MeshLambertMaterial() : new THREE.MeshStandardMaterial({ roughness: .85 });
+  for (const key of ['color', 'map', 'alphaMap', 'opacity', 'transparent', 'alphaTest', 'side', 'vertexColors', 'depthWrite', 'depthTest', 'wireframe', 'polygonOffset', 'polygonOffsetFactor', 'polygonOffsetUnits']) {
+    if (source[key] !== undefined) material[key] = source[key]?.isColor ? source[key].clone() : source[key];
+  }
+  return material;
+}
+
 function disposeObject(root) {
   const geometries = new Set(), materials = new Set(), textures = new Set(), bitmaps = new Set();
   root?.traverse(object => {
     if (object.geometry) geometries.add(object.geometry);
-    for (const material of [object.material, object.userData.originalMaterial, object.userData.clayMaterial, object.userData.wireMaterial].flat()) {
+    for (const material of [object.material, object.userData.originalMaterial, object.userData.clayMaterial, object.userData.wireMaterial, object.userData.litMaterial, object.userData.flatMaterials].flat(Infinity)) {
       if (!material) continue;
       materials.add(material);
       for (const value of Object.values(material)) {
@@ -51,9 +83,30 @@ export function createViewer(host, asset, latest, restore) {
   controls.enableDamping = true;
   controls.dampingFactor = .12;
   controls.screenSpacePanning = true;
-  const ambient = new THREE.HemisphereLight(0xfff4df, 0x606675, 2);
+  const ambient = new THREE.AmbientLight(0xffffff, 1.05);
   const key = new THREE.DirectionalLight(0xfff1d9, 3);
-  scene.add(ambient, key, key.target);
+  const secondary = new THREE.DirectionalLight(0xffffff, 0);
+  scene.add(ambient, key, key.target, secondary, secondary.target);
+  renderer.shadowMap.enabled = asset.kind === 'mesh';
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  key.shadow.mapSize.set(1024, 1024);
+  key.shadow.bias = -.0002;
+  const lightDirection = new THREE.Vector3();
+  const lightColor = new THREE.Color();
+  let lighting = resolveLighting();
+
+  function positionLights() {
+    if (asset.kind !== 'mesh') return;
+    const azimuth = THREE.MathUtils.degToRad(bounded(lighting.lightAngle, 45, 0, 360));
+    const elevation = THREE.MathUtils.degToRad(bounded(lighting.lightElevation, 40, 0, 90));
+    // View-relative axes keep the backlight behind the specimen as the camera orbits.
+    lightDirection.set(Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), Math.cos(azimuth) * Math.cos(elevation)).applyQuaternion(camera.quaternion);
+    key.target.position.copy(center);
+    key.position.copy(center).addScaledVector(lightDirection, radius * 3);
+    secondary.target.position.copy(center);
+    lightDirection.set(-Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation)).applyQuaternion(camera.quaternion);
+    secondary.position.copy(center).addScaledVector(lightDirection, radius * 3);
+  }
   const plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
   const center = new THREE.Vector3(), size = new THREE.Vector3();
   const abort = new AbortController();
@@ -138,21 +191,38 @@ export function createViewer(host, asset, latest, restore) {
       projection();
     }
     if (asset.kind === 'mesh') {
+      lighting = resolveLighting(settings);
+      const flat = lighting.lightMode === 'flat';
+      const backlight = lighting.lightMode === 'backlight';
       root?.traverse(object => {
         if (!object.isMesh) return;
-        const original = object.userData.originalMaterial;
-        object.material = settings.appearance === 'clay' ? object.userData.clayMaterial : settings.appearance === 'wireframe' ? object.userData.wireMaterial : original;
+        const appearance = settings.appearance === 'clay' ? 1 : settings.appearance === 'wireframe' ? 2 : 0;
+        object.material = flat ? object.userData.flatMaterials[appearance] : appearance === 1 ? object.userData.clayMaterial : appearance === 2 ? object.userData.wireMaterial : object.userData.litMaterial;
+        object.castShadow = !flat;
+        object.receiveShadow = !flat;
         for (const m of [object.material].flat()) {
           const clipping = !!settings.clipEnabled;
           if (!!m.clippingPlanes !== clipping) { m.clippingPlanes = clipping ? [plane] : null; m.needsUpdate = true; }
         }
       });
       plane.constant = center.x + bounded(settings.clipOffset, 0, -1, 1) * size.x / 2;
-      const angle = THREE.MathUtils.degToRad(finite(settings.lightAngle, 45));
-      key.target.position.copy(center);
-      key.position.copy(center).add(new THREE.Vector3(Math.cos(angle) * radius * 3, radius * (settings.raking ? .12 : 2), Math.sin(angle) * radius * 3));
-      ambient.intensity = settings.raking ? .25 : 2;
-      key.intensity = settings.raking ? 5 : 3;
+      lightColor.set(lighting.lightTemperature === 'warm' ? 0xffd4a3 : lighting.lightTemperature === 'cool' ? 0xc6ddff : 0xffffff);
+      key.color.copy(lightColor);
+      secondary.color.copy(lightColor);
+      ambient.color.copy(lightColor);
+      const strength = bounded(lighting.lightIntensity, 100, 0, 200) * .03;
+      key.intensity = flat ? 0 : strength;
+      secondary.intensity = !flat && !backlight && lighting.secondaryFill ? strength * .65 : 0;
+      ambient.intensity = backlight ? 0 : bounded(lighting.ambientFill, 35, 0, 100) * .03;
+      key.castShadow = !flat;
+      key.shadow.camera.left = key.shadow.camera.bottom = -radius * 1.2;
+      key.shadow.camera.right = key.shadow.camera.top = radius * 1.2;
+      key.shadow.camera.near = radius * .01;
+      key.shadow.camera.far = radius * 6;
+      key.shadow.normalBias = radius * .001;
+      key.shadow.camera.updateProjectionMatrix();
+      renderer.setClearColor(backlight ? 0xdbe2e5 : 0x191b1d, 1);
+      positionLights();
     }
     if (asset.kind === 'points' && root) root.material.size = bounded(settings.pointSize, 2, .1, 30);
     if (ready && splats?.splatMesh?.material) {
@@ -181,6 +251,7 @@ export function createViewer(host, asset, latest, restore) {
   }
 
   function draw() {
+    positionLights();
     if (splats) {
       splats.update();
       if (dirty || splats.shouldRender()) splats.render();
@@ -274,9 +345,12 @@ export function createViewer(host, asset, latest, restore) {
             vertices += geometry.attributes.position?.count || 0;
             faces += (geometry.index?.count || geometry.attributes.position?.count || 0) / 3;
             object.userData.originalMaterial = object.material;
+            const mapMaterials = (material, transform) => Array.isArray(material) ? material.map(transform) : transform(material);
+            object.userData.litMaterial = mapMaterials(object.material, material => inspectionMaterial(material));
             const makeMaterial = wireframe => new THREE.MeshStandardMaterial({ color: wireframe ? 0xc6a77a : 0xc9c5bb, roughness: .85, metalness: 0, wireframe, side: THREE.DoubleSide });
             object.userData.clayMaterial = makeMaterial(false);
             object.userData.wireMaterial = makeMaterial(true);
+            object.userData.flatMaterials = [object.material, object.userData.clayMaterial, object.userData.wireMaterial].map(material => mapMaterials(material, source => inspectionMaterial(source, true)));
           });
           root.updateMatrixWorld(true);
           box.setFromObject(root);
@@ -302,7 +376,7 @@ export function createViewer(host, asset, latest, restore) {
       applySettings();
       command(latest.current.cameraCommand);
       latest.current.onReady?.({ type: asset.kind, vertices, ...(faces !== undefined ? { faces: Math.floor(faces) } : {}),
-        capabilities: { orbit: true, capture: true, cameraPresets: true, orthographic: asset.kind === 'mesh', clipping: asset.kind === 'mesh', raking: asset.kind === 'mesh', pointCloud: asset.kind === 'splat', splatScale: asset.kind === 'splat', pointSize: asset.kind === 'points', spin: asset.kind !== 'mesh', alphaThreshold: false } });
+        capabilities: { orbit: true, capture: true, cameraPresets: true, orthographic: asset.kind === 'mesh', clipping: asset.kind === 'mesh', lighting: asset.kind === 'mesh', raking: asset.kind === 'mesh', pointCloud: asset.kind === 'splat', splatScale: asset.kind === 'splat', pointSize: asset.kind === 'points', spin: asset.kind !== 'mesh', alphaThreshold: false } });
     } catch (e) {
       if (!dead && e.name !== 'AbortError') {
         error(e);
@@ -338,6 +412,7 @@ export function createViewer(host, asset, latest, restore) {
     canvas.removeEventListener('webglcontextlost', contextLost);
     canvas.removeEventListener('webglcontextrestored', restore);
     disposeObject(root);
+    key.shadow.dispose();
     scene.clear();
     canvas.remove();
     // Native disposal waits for any pending worker sort/download before releasing GPU resources.
