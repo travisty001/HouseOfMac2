@@ -1,0 +1,15 @@
+ply
+format ascii 1.0
+comment QA ordinary point cloud; intentionally no Gaussian attributes
+element vertex 4
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+-1 0 0 255 100 50
+1 0 0 50 255 100
+0 1 0 100 50 255
+0 0 1 240 240 240
