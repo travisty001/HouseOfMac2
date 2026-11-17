@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowLeftRight, ArrowUpRight, Box, Camera, Check, Crosshair, FolderOpen, Image, Keyboard, Layers, MousePointer2, Move3D, Plus, RotateCcw, ScanLine, Settings2, Upload, X } from 'lucide-react';
 import Viewer from './engine/Viewer';
+import MaskEditor from './MaskEditor';
 import { captureFilename, lightingPresets, recordingMimeType } from './engine/runtime.js';
 
-const defaults = { appearance: 'original', lightingPreset: 'studio', ...lightingPresets.studio, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, speed: 0.3, orthographic: false };
-const samples = [{ url: '/final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: '/3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
+const defaults = { appearance: 'original', lightingPreset: 'studio', ...lightingPresets.studio, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, spinDirection: 1, speed: 0.3, orthographic: false };
+const samples = [{ url: import.meta.env.BASE_URL + 'final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: import.meta.env.BASE_URL + '3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
 const kindLabel = { mesh: 'Mesh', splat: 'Gaussian splat', points: 'Point cloud' };
 const bytes = n => n == null ? 'Reference asset' : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
@@ -85,6 +86,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [commands, setCommands] = useState([null, null]);
+  const [maskSource,setMaskSource] = useState(null);
   const [fps, setFps] = useState(30);
   const [autoTurntable, setAutoTurntable] = useState(true);
   const [recording, setRecording] = useState({ status: 'idle', elapsed: 0 });
@@ -151,6 +153,7 @@ export default function App() {
     finally { setBusy(false); if (inputRef.current) inputRef.current.value = ''; }
   };
   const chooseFile = (slot = active) => { targetRef.current = slot; inputRef.current?.click(); };
+  const openMask = async () => {try {const handler=active===0?capture0.current:capture1.current;if(!handler)throw Error('Wait for renderer');setMaskSource(await handler());setTab('Capture')}catch(e){setNotice(e.message)}};
   const capture = useCallback(async () => {
     const handler = active === 0 ? capture0.current : capture1.current;
     if (!handler) { setNotice('Wait for the renderer to finish loading before capturing.'); return; }
@@ -178,6 +181,7 @@ export default function App() {
   const onReady = useCallback((slot, info) => { setMetadata(p => p.map((m, i) => i === slot ? info : m)); setReady(p => p.map((r, i) => i === slot ? true : r)); setErrors(p => p.map((e, i) => i === slot ? '' : e)); }, []);
   const onError = useCallback((slot, error) => { setErrors(p => p.map((e, i) => i === slot ? String(error) : e)); setReady(p => p.map((r, i) => i === slot ? false : r)); }, []);
   return <div className={`app-shell ${busy ? 'is-importing' : ''}`}>
+    {maskSource && <MaskEditor source={maskSource} name={assets[active]?.name} onClose={()=>setMaskSource(null)}/>}
     <input ref={inputRef} type="file" multiple accept=".glb,.gltf,.ply,.splat,.ksplat,.bin,.png,.jpg,.jpeg,.webp,.ktx2" hidden onChange={e => importFiles(e.target.files)} />
     <header className="app-header">
       <a className="brand" href="#" onClick={e => e.preventDefault()} aria-label="House of Mac home"><span className="brand-symbol"><Box size={23} strokeWidth={1.4} /></span><span>HOUSE OF MAC<span className="brand-version">2.0 / FIELD STUDIO</span></span></a>
@@ -218,11 +222,13 @@ export default function App() {
             <div className="section-intro"><h1>Keep the observation.</h1><p>Save the selected viewport at its current rendering resolution.</p></div>
             <div className="capture-summary"><Image size={28} strokeWidth={1.2} /><span>PNG image<small>{compare ? `Viewport 0${active + 1}` : 'Current viewport'} · Current camera</small></span></div>
             <button className="primary-button full-width" disabled={!ready[active]} onClick={capture}><ArrowDownToLine size={16} />Save screenshot<kbd>S</kbd></button>
+            <button className="secondary-button full-width" disabled={!ready[active]} onClick={openMask}>Magnetic outline / annotation mask</button>
+            <section className="tool-section" aria-label="Turntable controls"><h2>Turntable · live preview</h2><Toggle label="Rotate model" checked={current.spin} onChange={v => update('spin',v)} /><div className="segmented" role="group" aria-label="Turntable direction"><button className={current.spinDirection===-1 ? 'selected' : ''} onClick={()=>update('spinDirection',-1)}>Reverse</button><button className={current.spinDirection===1 ? 'selected' : ''} onClick={()=>update('spinDirection',1)}>Forward</button></div><Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v=>update('speed',v)} /><button className="secondary-button full-width" onClick={()=>update('spin',false)}>Pause rotation</button><p className="quiet-note">Works without recording. Speed and direction remain adjustable during recording.</p></section>
             <section className="tool-section video-capture" aria-label="WebM video recording">
               <div className="section-title"><h2>WebM video</h2><span className={`recording-timer ${isRecording ? 'running' : ''}`} role="timer" aria-label="Recording elapsed time">{elapsedLabel}</span></div>
               <label className="video-fps">Frame rate<select className="lighting-select" value={fps} disabled={isRecording} onChange={e => setFps(Number(e.target.value))}>{[15, 24, 30].map(value => <option key={value} value={value}>{value} FPS</option>)}</select></label>
               <fieldset className="video-options" disabled={isRecording}><Toggle label="Auto-turntable" checked={autoTurntable} onChange={setAutoTurntable} /></fieldset>
-              {autoTurntable && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}
+              
               {isRecording ? <button className="secondary-button full-width recording-stop" disabled={recording.status === 'stopping'} onClick={() => recordingRefs[active].current?.stop()}>{recording.status === 'stopping' ? 'Finishing WebM…' : 'Stop & save WebM'}</button> : <button className="primary-button full-width" disabled={!ready[active] || !videoSupported} onClick={startRecording}>Start WebM recording</button>}
               {!videoSupported && <p className="capture-error" role="alert">This browser does not support canvas recording with WebM. Try a browser with MediaRecorder and WebM support.</p>}
               {recordingError && <p className="capture-error" role="alert">{recordingError}</p>}
@@ -235,7 +241,7 @@ export default function App() {
             {asset && <>
               <section className="tool-section"><h2>Surface display</h2>{asset.kind === 'mesh' ? <><div className="segmented">{[['original', 'Texture'], ['clay', 'Neutral'], ['wireframe', 'Wire']].map(([value, label]) => <button key={value} aria-pressed={current.appearance === value} className={current.appearance === value ? 'selected' : ''} onClick={() => update('appearance', value)}>{label}</button>)}</div></> : asset.kind === 'splat' ? <><Toggle label="Point cloud" detail="Inspect Gaussian centers" checked={current.pointCloud} onChange={v => update('pointCloud', v)} /><Range label="Splat scale" min={0.1} max={5} step={0.05} value={current.splatScale} suffix="×" onChange={v => update('splatScale', v)} /></> : <Range label="Point size" min={0.1} max={20} step={0.1} suffix=" px" value={current.pointSize} onChange={v => update('pointSize', v)} />}</section>
               {asset.kind === 'mesh' && <LightingRig settings={current} onChange={updateLighting} />}
-              <section className="tool-section"><div className="section-title"><h2>Camera</h2><button className="inline-action" onClick={() => command('reset')}>Fit <kbd>F</kbd></button></div><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{canSpin && <Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}{current.spin && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}</section>
+              <section className="tool-section"><div className="section-title"><h2>Camera</h2><button className="inline-action" onClick={() => command('reset')}>Fit <kbd>F</kbd></button></div><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{<Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}{current.spin && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}</section>
               {asset.kind === 'mesh' && <section className="tool-section"><h2>Section plane</h2><Toggle label="Clip geometry" checked={current.clipEnabled} onChange={v => update('clipEnabled', v)} />{current.clipEnabled && <Range label="Plane offset" min={-1} max={1} step={0.01} value={current.clipOffset} onChange={v => update('clipOffset', v)} />}</section>}
               <section className="tool-section provenance"><h2>Source & integrity</h2><dl><div><dt>Source</dt><dd>{asset.sample ? asset.source : <select aria-label="File provenance" className="source-select" value={asset.source} onChange={e => setAssets(previous => previous.map((a, i) => i === active ? { ...a, source: e.target.value } : a))}><option>Local file</option><option>KIRI Engine export</option></select>}</dd></div><div><dt>Format</dt><dd>{asset.name.split('.').pop().toUpperCase()}</dd></div>{metadata[active]?.vertices != null && <div><dt>{asset.kind === 'mesh' ? 'Vertices' : 'Points'}</dt><dd>{Number(metadata[active].vertices).toLocaleString()}</dd></div>}{metadata[active]?.faces != null && <div><dt>Faces</dt><dd>{Number(metadata[active].faces).toLocaleString()}</dd></div>}</dl><p><Check size={12} />Original file preserved</p><a className="original-download" href={asset.originalUrl || asset.url} download={asset.name}><ArrowDownToLine size={12} />Download original</a><span className="quiet-note">Uncalibrated capture. Physical dimensions cannot be inferred.</span></section>
             </>}
