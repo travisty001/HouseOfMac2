@@ -4,7 +4,7 @@ import Viewer from './engine/Viewer';
 import MaskEditor from './MaskEditor';
 import { captureFilename, lightingPresets, recordingMimeType } from './engine/runtime.js';
 
-const defaults = { appearance: 'original', lightingPreset: 'studio', ...lightingPresets.studio, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: false, spinDirection: 1, speed: 0.3, orthographic: false };
+const defaults = { appearance: 'original', lightingPreset: 'raking', ...lightingPresets.raking, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: true, spinDirection: 1, speed: 1, orthographic: false };
 const samples = [{ url: import.meta.env.BASE_URL + 'final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: import.meta.env.BASE_URL + '3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
 const kindLabel = { mesh: 'Mesh', splat: 'Gaussian splat', points: 'Point cloud' };
 const bytes = n => n == null ? 'Reference asset' : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
