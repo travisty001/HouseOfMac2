@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { integrateRotation, shots } from './workbench.js';
 
 const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const bounded = (value, fallback, min, max) => THREE.MathUtils.clamp(finite(value, fallback), min, max);
@@ -19,6 +20,9 @@ export function captureFilename(name, extension) {
 
 // Percentages map linearly to bounded Three.js light strengths (100% key = 3).
 export const lightingPresets = {
+  softbox: { label: 'Soft studio', lightMode: 'spot', lightAngle: 40, lightElevation: 48, lightIntensity: 90, ambientFill: 30, lightTemperature: 'neutral', secondaryFill: false, lightDistance: 3, lightSoftness: 75, lightSpace: 'stage' },
+  close: { label: 'Close raking lamp', lightMode: 'spot', lightAngle: 78, lightElevation: 7, lightIntensity: 105, ambientFill: 5, lightTemperature: 'neutral', secondaryFill: false, lightDistance: 2, lightSoftness: 22, lightSpace: 'stage' },
+  sweep: { label: 'Raking sweep', lightMode: 'directional', lightAngle: 0, lightElevation: 9, lightIntensity: 115, ambientFill: 8, lightTemperature: 'neutral', secondaryFill: false, lightSpace: 'stage', lightSweep: true },
   studio: { label: 'Studio', lightMode: 'directional', lightAngle: 45, lightElevation: 40, lightIntensity: 100, ambientFill: 35, lightTemperature: 'neutral', secondaryFill: false },
   raking: { label: 'Raking', lightMode: 'directional', lightAngle: 80, lightElevation: 8, lightIntensity: 130, ambientFill: 8, lightTemperature: 'neutral', secondaryFill: false },
   cross: { label: 'Cross-light', lightMode: 'directional', lightAngle: 65, lightElevation: 25, lightIntensity: 100, ambientFill: 15, lightTemperature: 'neutral', secondaryFill: true },
@@ -28,7 +32,8 @@ export const lightingPresets = {
 
 export function resolveLighting(settings = {}) {
   const preset = lightingPresets[settings.lightingPreset] || (settings.raking ? lightingPresets.raking : lightingPresets.studio);
-  return { ...preset, ...Object.fromEntries(Object.keys(preset).filter(key => key !== 'label' && settings[key] !== undefined).map(key => [key, settings[key]])) };
+  const base = { ...lightingPresets.studio, lightDistance: 3, lightSoftness: 25, lightSpace: 'stage', lightSweep: false, exposure: 1, ...preset };
+  return { ...base, ...Object.fromEntries(Object.keys(base).filter(key => key !== 'label' && settings[key] !== undefined).map(key => [key, settings[key]])) };
 }
 
 // Ambient-only Lambert diffuse has no normal-dependent shading, even on metallic sources.
@@ -76,11 +81,12 @@ function disposeObject(root) {
 export function createViewer(host, asset, latest, restore) {
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'low-power', preserveDrawingBuffer: true });
+    renderer = new THREE.WebGLRenderer({ antialias: asset.kind === 'mesh', alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
   } catch (error) { throw new Error(`WebGL2 is required. ${error.message}`); }
   renderer.setPixelRatio(1);
   renderer.setClearColor(0x191b1d, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  if (asset.kind === 'mesh') renderer.toneMapping = THREE.NeutralToneMapping;
   renderer.localClippingEnabled = true;
   const canvas = renderer.domElement;
   Object.assign(canvas.style, { display: 'block', width: '100%', height: '100%', touchAction: 'none' });
@@ -88,6 +94,11 @@ export function createViewer(host, asset, latest, restore) {
   host.appendChild(canvas);
 
   const scene = new THREE.Scene();
+  const table = new THREE.Group();
+  const vertical = new THREE.Vector3(0, 1, 0);
+  scene.add(table);
+  let angularSpeed = 0, angle = 0, seek = null, sweepAngle = 0, sweepTime = 0;
+  let sweepOrigin = 0, sweepDirection = 1, shotBusy = false;
   const perspective = new THREE.PerspectiveCamera(45, 1, .01, 1000);
   const orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, .01, 1000);
   let camera = perspective;
@@ -98,33 +109,42 @@ export function createViewer(host, asset, latest, restore) {
   const ambient = new THREE.AmbientLight(0xffffff, 1.05);
   const key = new THREE.DirectionalLight(0xfff1d9, 3);
   const secondary = new THREE.DirectionalLight(0xffffff, 0);
-  scene.add(ambient, key, key.target, secondary, secondary.target);
+  const lamp = new THREE.SpotLight(0xffffff, 0, 0, Math.PI / 5, .3, 2);
+  scene.add(ambient, key, key.target, secondary, secondary.target, lamp, lamp.target);
   renderer.shadowMap.enabled = asset.kind === 'mesh';
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  lamp.shadow.mapSize.set(1024, 1024);
+  lamp.shadow.bias = -.00015;
   key.shadow.mapSize.set(1024, 1024);
   key.shadow.bias = -.0002;
   const lightDirection = new THREE.Vector3();
   const lightColor = new THREE.Color();
   let lighting = resolveLighting();
 
-  function positionLights() {
+  function positionLights(view = camera) {
     if (asset.kind !== 'mesh') return;
-    const azimuth = THREE.MathUtils.degToRad(bounded(lighting.lightAngle, 45, 0, 360));
+    const azimuth = THREE.MathUtils.degToRad(bounded(lighting.lightAngle, 45, 0, 360) + sweepAngle);
     const elevation = THREE.MathUtils.degToRad(bounded(lighting.lightElevation, 40, 0, 90));
-    // View-relative axes keep the backlight behind the specimen as the camera orbits.
-    lightDirection.set(Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), Math.cos(azimuth) * Math.cos(elevation)).applyQuaternion(camera.quaternion);
+    const viewRelative = lighting.lightMode === 'backlight' || lighting.lightSpace === 'camera';
+    view.updateMatrixWorld();
+    lightDirection.set(Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), Math.cos(azimuth) * Math.cos(elevation));
+    if (viewRelative) lightDirection.applyQuaternion(view.quaternion);
     key.target.position.copy(center);
     key.position.copy(center).addScaledVector(lightDirection, radius * 3);
+    lamp.position.copy(center).addScaledVector(lightDirection, radius * bounded(lighting.lightDistance, 3, 1.2, 8));
+    lamp.target.position.copy(center);
     secondary.target.position.copy(center);
-    lightDirection.set(-Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation)).applyQuaternion(camera.quaternion);
+    lightDirection.set(-Math.sin(azimuth) * Math.cos(elevation), Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation));
+    if (viewRelative) lightDirection.applyQuaternion(view.quaternion);
     secondary.position.copy(center).addScaledVector(lightDirection, radius * 3);
   }
   const plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
   const center = new THREE.Vector3(), size = new THREE.Vector3();
   const abort = new AbortController();
   let root, splats, ready = false, dead = false, lost = false, frame = 0, radius = 1;
-  let width = 1, height = 1, orthoHeight = 2, dirty = true, lastTime = 0, lastDraw = 0, lastNotify = 0;
+  let width = 1, height = 1, orthoHeight = 2, dirty = true, lastTime = 0, lastNotify = 0;
   let lastCommandId, hasCommand = false, settings = {}, visible = true;
+  let materialSettings;
   let recording = null, downloadUrl = null, downloadTimer = null;
   function clearDownload() {
     clearTimeout(downloadTimer);
@@ -208,8 +228,13 @@ export function createViewer(host, asset, latest, restore) {
   }
 
   function applySettings() {
-    if (dead) return;
-    settings = latest.current.settings || {};
+    if (dead || shotBusy) return;
+    const nextSettings = latest.current.settings || {};
+    if (nextSettings.spinMode !== settings.spinMode || nextSettings.spinDirection !== settings.spinDirection) {
+      sweepOrigin = angle;
+      sweepDirection = 1;
+    }
+    settings = nextSettings;
     const next = settings.orthographic && asset.kind === 'mesh' ? orthographic : perspective;
     if (camera !== next) {
       if (next.isOrthographicCamera) {
@@ -229,10 +254,13 @@ export function createViewer(host, asset, latest, restore) {
       projection();
     }
     if (asset.kind === 'mesh') {
-      lighting = resolveLighting(settings);
+      const nextLighting = resolveLighting(settings);
+      if (lighting.lightSweep !== nextLighting.lightSweep) sweepAngle = sweepTime = 0;
+      lighting = nextLighting;
       const flat = lighting.lightMode === 'flat';
       const backlight = lighting.lightMode === 'backlight';
-      root?.traverse(object => {
+      const materialKey = `${flat}:${settings.appearance}:${!!settings.clipEnabled}`;
+      if (materialSettings !== materialKey && root) root.traverse(object => {
         if (!object.isMesh) return;
         const appearance = settings.appearance === 'clay' ? 1 : settings.appearance === 'wireframe' ? 2 : 0;
         object.material = flat ? object.userData.flatMaterials[appearance] : appearance === 1 ? object.userData.clayMaterial : appearance === 2 ? object.userData.wireMaterial : object.userData.litMaterial;
@@ -243,16 +271,29 @@ export function createViewer(host, asset, latest, restore) {
           if (!!m.clippingPlanes !== clipping) { m.clippingPlanes = clipping ? [plane] : null; m.clipShadows = clipping; m.needsUpdate = true; }
         }
       });
+      if (root) materialSettings = materialKey;
       plane.constant = center.x + bounded(settings.clipOffset, 0, -1, 1) * size.x / 2;
       lightColor.set(lighting.lightTemperature === 'warm' ? 0xffd4a3 : lighting.lightTemperature === 'cool' ? 0xc6ddff : 0xffffff);
       key.color.copy(lightColor);
       secondary.color.copy(lightColor);
+      lamp.color.copy(lightColor);
       ambient.color.copy(lightColor);
       const strength = bounded(lighting.lightIntensity, 100, 0, 200) * .03;
-      key.intensity = flat ? 0 : strength;
+      const nearby = lighting.lightMode === 'spot';
+      key.intensity = flat || nearby ? 0 : strength;
+      lamp.intensity = nearby ? strength * radius ** 2 * 9 : 0;
+      const softness = bounded(lighting.lightSoftness, 25, 0, 100) / 100;
+      key.shadow.radius = 1 + softness * 4;
+      lamp.shadow.radius = key.shadow.radius;
+      lamp.shadow.normalBias = radius * .001;
+      lamp.shadow.camera.near = radius * .01;
+      lamp.shadow.camera.far = radius * 12;
+      lamp.penumbra = softness * .85;
+      lamp.castShadow = nearby;
+      renderer.toneMappingExposure = bounded(lighting.exposure, 1, .3, 2.5);
       secondary.intensity = !flat && !backlight && lighting.secondaryFill ? strength * .65 : 0;
       ambient.intensity = backlight ? 0 : bounded(lighting.ambientFill, 35, 0, 100) * .03;
-      key.castShadow = !flat;
+      key.castShadow = !flat && !nearby;
       key.shadow.camera.left = key.shadow.camera.bottom = -radius * 1.2;
       key.shadow.camera.right = key.shadow.camera.top = radius * 1.2;
       key.shadow.camera.near = radius * .01;
@@ -273,42 +314,84 @@ export function createViewer(host, asset, latest, restore) {
   }
 
   function command(cmd) {
-    if (!ready || !cmd || (hasCommand && cmd.id === lastCommandId)) return;
+    if (!ready || shotBusy || !cmd || (hasCommand && cmd.id === lastCommandId)) return;
     hasCommand = true;
     lastCommandId = cmd.id;
-    const directions = { front: [0, 0, 1], back: [0, 0, -1], left: [-1, 0, 0], right: [1, 0, 0], top: [0, 1, 0], bottom: [0, -1, 0] };
     if (cmd.action === 'reset' || cmd.action === 'fit') fit();
-    else if (directions[cmd.action]) fit(new THREE.Vector3(...directions[cmd.action]));
-    else if (cmd.action === 'step-left' || cmd.action === 'step-right') {
-      offset.copy(camera.position).sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), (cmd.action === 'step-left' ? -1 : 1) * Math.PI / 12);
-      camera.position.copy(controls.target).add(offset);
-      camera.lookAt(controls.target);
-      controls.update();
-      dirty = true;
+    else if (shots[cmd.action]) {
+      seek = null;
+      rotateTable(-angle);
+      angularSpeed = 0;
+      fit(new THREE.Vector3(...shots[cmd.action].direction));
+    } else if (cmd.action === 'zero' || cmd.action === 'step-left' || cmd.action === 'step-right' || cmd.action === 'angle') {
+      const step = Math.PI / 12;
+      const target = cmd.action === 'zero' ? 0 : cmd.action === 'angle' ?
+        THREE.MathUtils.degToRad(cmd.value) : angle + (cmd.action === 'step-left' ? -step : step);
+      const difference = THREE.MathUtils.euclideanModulo(target - angle + Math.PI, 2 * Math.PI) - Math.PI;
+      seek = { start: angle, distance: difference, elapsed: 0 };
+      angularSpeed = 0;
+      sweepOrigin = angle + difference;
+      sweepDirection = 1;
     }
   }
 
-  function draw() {
-    positionLights();
+  function rotateTable(travel) {
+    if (!travel) return;
+    angle += travel;
+    if (asset.kind === 'mesh') table.rotation.y = angle;
+    else {
+      offset.copy(camera.position).sub(controls.target).applyAxisAngle(vertical, -travel);
+      camera.position.copy(controls.target).add(offset);
+      camera.lookAt(controls.target);
+    }
+    dirty = true;
+  }
+
+  function advanceTable(delta) {
+    if (seek) {
+      seek.elapsed = Math.min(1, seek.elapsed + delta / .24);
+      const ease = seek.elapsed ** 2 * (3 - 2 * seek.elapsed);
+      rotateTable(seek.start + seek.distance * ease - angle);
+      if (seek.elapsed === 1) seek = null;
+      return;
+    }
+    const running = settings.spin || recording?.turntable;
+    const mode = settings.spinMode || 'continuous';
+    const direction = settings.spinDirection === -1 ? -1 : 1;
+    let target = running ? THREE.MathUtils.degToRad(bounded(settings.speed, 1, .05, 10) * 18) * direction : 0;
+    if (running && mode === 'sweep') {
+      const span = THREE.MathUtils.degToRad(bounded(settings.sweepDegrees, 90, 20, 330)) / 2;
+      const displacement = (angle - sweepOrigin) * direction;
+      if (sweepDirection * displacement >= span - .002 && Math.abs(angularSpeed) < .035) {
+        sweepDirection *= -1;
+      }
+      const remaining = Math.max(0, span - displacement * sweepDirection);
+      target = Math.min(Math.abs(target), remaining * 3) * direction * sweepDirection;
+    }
+    const motion = integrateRotation(angularSpeed, target, delta);
+    angularSpeed = Math.abs(motion.speed) < .00001 ? 0 : motion.speed;
+    if (angularSpeed || target) rotateTable(motion.travel);
+  }
+
+  function draw(view = camera, force = false) {
+    positionLights(view);
     if (splats) {
       splats.update();
-      if (dirty || recording || splats.shouldRender()) splats.render();
+      if (force || dirty || recording || splats.shouldRender()) splats.render();
       splats.renderNextFrame = false;
-    } else renderer.render(scene, camera);
+    } else renderer.render(scene, view);
   }
   function tick(time) {
     if (dead) return;
     frame = requestAnimationFrame(tick);
-    const interval = recording ? 1000 / recording.fps : 32;
-    if (!ready || lost || !visible || document.hidden || time - lastDraw < interval) return;
-    const delta = Math.min((time - lastTime) / 1000 || 0, .1);
+    if (!ready || lost || !visible || document.hidden) { lastTime = 0; return; }
+    if (shotBusy) { lastTime = time; return; }
+    const delta = lastTime ? Math.min((time - lastTime) / 1000, .1) : 0;
     lastTime = time;
-    // Carry the remainder so 24 FPS does not fall to 20 on a 60 Hz display.
-    lastDraw = recording ? time - (time - lastDraw) % interval : time;
-    if (settings.spin || (recording && recording.turntable)) {
-      offset.copy(camera.position).sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * bounded(settings.speed, 1, 0.05, 10) * (settings.spinDirection === -1 ? -1 : 1) * .3);
-      camera.position.copy(controls.target).add(offset);
-      camera.lookAt(controls.target);
+    advanceTable(delta);
+    if (lighting.lightSweep && asset.kind === 'mesh') {
+      sweepTime += delta;
+      sweepAngle = sweepTime * 24 % 360;
       dirty = true;
     }
     controls.update();
@@ -322,7 +405,7 @@ export function createViewer(host, asset, latest, restore) {
     }
     if (notify && time - lastNotify > 100) {
       lastNotify = time;
-      latest.current.onCameraChange?.({ position: camera.position.toArray(), target: controls.target.toArray(), up: camera.up.toArray(), zoom: camera.zoom, orthographic: camera.isOrthographicCamera === true });
+      latest.current.onCameraChange?.({ tableAngle: THREE.MathUtils.euclideanModulo(THREE.MathUtils.radToDeg(angle), 360), position: camera.position.toArray(), target: controls.target.toArray(), up: camera.up.toArray(), zoom: camera.zoom, orthographic: camera.isOrthographicCamera === true });
     }
     dirty = false;
   }
@@ -407,18 +490,23 @@ export function createViewer(host, asset, latest, restore) {
           geometry.computeBoundingBox();
           box.copy(geometry.boundingBox);
         } else throw new Error(`Unsupported asset kind: ${asset.kind}`);
-        scene.add(root);
+        if (asset.kind !== 'mesh') scene.add(root);
       }
       if (box.isEmpty() || !isFinitePoint(box.min) || !isFinitePoint(box.max) || !vertices) throw new Error('The asset has no finite renderable positions.');
       box.getCenter(center);
       box.getSize(size);
+      if (asset.kind === 'mesh') {
+        table.position.copy(center);
+        root.position.sub(center);
+        table.add(root);
+      }
       radius = Math.max(size.length() / 2, .0001);
       ready = true;
       fit();
       applySettings();
       command(latest.current.cameraCommand);
       latest.current.onReady?.({ type: asset.kind, vertices, ...(faces !== undefined ? { faces: Math.floor(faces) } : {}),
-        capabilities: { orbit: true, capture: true, cameraPresets: true, orthographic: asset.kind === 'mesh', clipping: asset.kind === 'mesh', lighting: asset.kind === 'mesh', raking: asset.kind === 'mesh', pointCloud: asset.kind === 'splat', splatScale: asset.kind === 'splat', pointSize: asset.kind === 'points', spin: asset.kind !== 'mesh', alphaThreshold: false } });
+        capabilities: { orbit: true, capture: true, cameraPresets: true, orthographic: asset.kind === 'mesh', clipping: asset.kind === 'mesh', lighting: asset.kind === 'mesh', raking: asset.kind === 'mesh', pointCloud: asset.kind === 'splat', splatScale: asset.kind === 'splat', pointSize: asset.kind === 'points', spin: true, alphaThreshold: false } });
     } catch (e) {
       if (!dead && e.name !== 'AbortError') {
         error(e);
@@ -428,6 +516,7 @@ export function createViewer(host, asset, latest, restore) {
   }
 
   async function capture() {
+    if (shotBusy) throw new Error('Wait for the shot list to finish.');
     if (!ready || dead || lost) throw new Error('Wait for the asset to finish loading before capturing.');
     try {
       // Render immediately so screenshots include the latest settings and camera.
@@ -442,19 +531,78 @@ export function createViewer(host, asset, latest, restore) {
     }
   }
 
+  async function captureShots(selection) {
+    if (!ready || dead || lost) throw new Error('Wait for the specimen to load before capturing shots.');
+    if (recording || shotBusy) throw new Error('Finish the current capture first.');
+    const results = [];
+    const liveRotation = table.rotation.y;
+    const liveSweep = sweepAngle;
+    shotBusy = true;
+    try {
+      table.rotation.y = 0;
+      sweepAngle = 0;
+      for (const id of selection) {
+        if (dead || lost) throw new Error('The viewport closed during capture.');
+        const shot = shots[id];
+        if (!shot) throw new Error('Unknown camera shot.');
+        const view = camera.clone();
+        const limiting = Math.min(Math.PI / 8, Math.atan(Math.tan(Math.PI / 8) * width / height));
+        view.position.copy(center).addScaledVector(new THREE.Vector3(...shot.direction).normalize(), radius / Math.sin(limiting) * 1.15);
+        view.up.set(...(shot.up || [0, 1, 0]));
+        view.zoom = 1;
+        if (view.isOrthographicCamera) {
+          const halfHeight = radius * 1.15 / Math.min(1, width / height);
+          view.left = -halfHeight * width / height;
+          view.right = -view.left;
+          view.top = halfHeight;
+          view.bottom = -halfHeight;
+        }
+        view.lookAt(center);
+        view.updateProjectionMatrix();
+        if (splats) {
+          splats.camera = view;
+          splats.forceRenderNextFrame();
+          // The splat viewer owns an asynchronous depth sort. Wait before exposing the frame.
+          view.updateMatrixWorld();
+          await splats.sortPromise;
+          await splats.runSplatSort(true, true);
+          await splats.sortPromise;
+          if (dead || lost) throw new Error('The viewport closed during capture.');
+        }
+        draw(view, true);
+        const image = await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('The browser could not encode a PNG.')), 'image/png'));
+        results.push({ id, label: shot.label, image, direction: shot.direction, width: canvas.width, height: canvas.height });
+      }
+      return results;
+    } finally {
+      table.rotation.y = liveRotation;
+      sweepAngle = liveSweep;
+      if (splats) {
+        splats.camera = camera;
+        if (!dead) splats.forceRenderNextFrame();
+      }
+      shotBusy = false;
+      if (!dead && !lost) {
+        applySettings();
+        command(latest.current.cameraCommand);
+      }
+      dirty = true;
+    }
+  }
+
   function startRecording({ fps = 30, turntable = true } = {}) {
     if (!ready || dead || lost || !visible) throw new Error('Wait for a visible, loaded specimen before recording.');
-    if (recording) throw new Error('A recording is already in progress.');
+    if (recording || shotBusy) throw new Error('Finish the current capture first.');
     const mimeType = recordingMimeType();
     if (!mimeType) throw new Error('This browser cannot record WebM from a canvas. Try a browser with MediaRecorder and WebM support.');
-    if (![15, 24, 30].includes(fps)) throw new Error('Choose 15, 24, or 30 FPS.');
+    if (![15, 24, 30, 60].includes(fps)) throw new Error('Choose 15, 24, 30, or 60 FPS.');
     let stream;
     try {
       clearDownload();
       dirty = true;
       draw();
       stream = canvas.captureStream(fps);
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: fps === 60 ? 16000000 : 10000000 });
       const session = { recorder, stream, fps, turntable, chunks: [], started: performance.now(), timer: null };
       recording = session;
       recorder.ondataavailable = event => { if (event.data.size) session.chunks.push(event.data); };
@@ -514,6 +662,7 @@ export function createViewer(host, asset, latest, restore) {
     canvas.removeEventListener('webglcontextrestored', restore);
     disposeObject(root);
     key.shadow.dispose();
+    lamp.shadow.dispose();
     scene.clear();
     canvas.remove();
     // Native disposal waits for any pending worker sort/download before releasing GPU resources.
@@ -521,5 +670,5 @@ export function createViewer(host, asset, latest, restore) {
     if (splats) Promise.resolve(splats.dispose()).catch(() => {}).finally(finish);
     else finish();
   }
-  return { load, applySettings, command, capture, startRecording, stopRecording, cancelRecording, dispose };
+  return { load, applySettings, command, capture, captureShots, startRecording, stopRecording, cancelRecording, dispose };
 }

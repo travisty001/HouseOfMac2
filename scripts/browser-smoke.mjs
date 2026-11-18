@@ -29,7 +29,7 @@ async function loadPuppeteer() {
 
 async function clickContext(page, label) {
   return page.evaluate(label => {
-    const aliases = { File: ['file', 'import'], Analyze: ['analyze', 'inspect'], Compare: ['compare'], Capture: ['capture'] }[label] || [label.toLowerCase()];
+    const aliases = { File: ['file', 'import'], Analyze: ['analyze', 'inspect'], Compare: ['compare'], Capture: ['capture', 'workbench'] }[label] || [label.toLowerCase()];
     const el = [...document.querySelectorAll('button,[role="tab"]')].find(el =>
       (aliases.includes(el.textContent.trim().toLowerCase()) || aliases.includes(el.getAttribute('aria-label')?.toLowerCase())) && !el.disabled);
     if (!el) return false;
