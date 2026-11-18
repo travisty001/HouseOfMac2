@@ -97,3 +97,37 @@ button:active:not(:disabled){transform:translateY(1px)}
 .capture-error{font-size:12px;color:#f0b9ae;line-height:1.6;overflow-wrap:anywhere}
 
 .mask-modal{position:fixed;inset:0;z-index:100;background:#17191a;color:#eee;display:flex;flex-direction:column;padding:12px;gap:9px}.mask-header,.mask-controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.mask-header{justify-content:space-between}.mask-header button,.mask-controls button{background:#303638;border:1px solid #666;color:#eee;padding:7px 10px}.mask-controls label{display:flex;align-items:center;gap:6px;font-size:12px}.mask-work{min-height:0;flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#111}.mask-work canvas{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;cursor:crosshair;touch-action:none}.mask-help{font-size:11px;color:#aaa;margin:0}
+
+.workbench-row, .table-buttons, .bench-list { display: flex; gap: 7px; }
+.workbench-row > label { flex: 1; min-width: 0; display: grid; gap: 5px; }
+.table-buttons { margin: 8px 0; flex-wrap: wrap; }
+.table-buttons button, .angle-form button, .shot-row button, .bench-list button {
+  min-height: 34px; background: #222426; color: #eee8e0; border: 1px solid #414245;
+  border-radius: 5px; padding: 5px 9px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.table-buttons button[aria-pressed=true], .bench-list button.selected { border-color: #a6a4ff; background: #313149; }
+.bench-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 8px; }
+.bench-list button { justify-content: flex-start; text-align: left; overflow: hidden; }
+.bench-list button svg { flex: none; }
+.bench-list button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.angle-form { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 8px 0; }
+.angle-form input { width: 76px; margin: 0 4px; background: #222426; color: #eee8e0; border: 1px solid #414245; padding: 5px; border-radius: 4px; }
+.shot-options { border: 0; padding: 0; margin: 0 0 8px; min-inline-size: 0; }
+.shot-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.shot-row label { display: inline-flex; align-items: center; gap: 8px; }
+.shot-row button { min-height: 27px; padding: 3px 8px; }
+.annotation-layout { display: grid; grid-template-columns: minmax(0, 1fr) 292px; min-height: 0; flex: 1; }
+.annotation-layout .mask-work { min-height: 0; }
+.annotation-panel { padding: 10px 14px; overflow: auto; border-left: 1px solid #3f4145; background: #1c1e20; }
+.annotation-panel .mask-controls { padding: 0; display: grid; gap: 5px; }
+.annotation-panel .mask-controls input[type=range] { max-width: 105px; }
+.annotation-panel select, .annotation-panel input:not([type]), .annotation-panel textarea {
+  width: 100%; padding: 5px; border: 1px solid #414245; border-radius: 4px; background: #242628; color: #fff;
+}
+.mark-details { display: grid; gap: 6px; margin: 8px 0; }
+.mark-details label { display: grid; gap: 3px; }
+.annotation-panel .full-width { margin-top: 6px; }
+@media (max-width: 700px) {
+  .annotation-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 48%) minmax(0, 1fr); }
+  .annotation-panel { border-left: 0; border-top: 1px solid #3f4145; }
+}

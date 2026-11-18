@@ -1,37 +1,44 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowLeftRight, ArrowUpRight, Box, Camera, Check, Crosshair, FolderOpen, Image, Keyboard, Layers, MousePointer2, Move3D, Plus, RotateCcw, ScanLine, Settings2, Upload, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeftRight, ArrowUpRight, Box, Camera, Check, Crosshair, FolderOpen, Keyboard, Layers, MousePointer2, Plus, ScanLine, Settings2, Upload, X } from 'lucide-react';
 import Viewer from './engine/Viewer';
 import MaskEditor from './MaskEditor';
-import { captureFilename, lightingPresets, recordingMimeType } from './engine/runtime.js';
+import { validateAnnotationProject } from './engine/annotations.js';
+import Workbench, { Range, Toggle } from './Workbench';
+import { download, downloadBlob, listScans, saveScan, shots } from './engine/workbench.js';
+import { zipSync, strToU8 } from 'fflate';
+import { captureFilename, lightingPresets, recordingMimeType, resolveLighting } from './engine/runtime.js';
 
-const defaults = { appearance: 'original', lightingPreset: 'raking', ...lightingPresets.raking, clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: true, spinDirection: 1, speed: 1, orthographic: false };
-const samples = [{ url: import.meta.env.BASE_URL + 'final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { url: import.meta.env.BASE_URL + '3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
+const defaults = { appearance: 'original', lightingPreset: 'raking', ...resolveLighting({ lightingPreset: 'raking' }), clipEnabled: false, clipOffset: 0, pointSize: 2, splatScale: 1, pointCloud: false, spin: true, spinDirection: 1, spinMode: 'continuous', sweepDegrees: 90, speed: 1, orthographic: false };
+const samples = [{ id: 'reference-mesh', url: import.meta.env.BASE_URL + 'final.glb', name: 'Reference specimen.glb', kind: 'mesh', source: 'Included reference', sample: true }, { id: 'reference-splat', url: import.meta.env.BASE_URL + '3DGS.ply', name: 'Gaussian study.ply', kind: 'splat', source: 'Included reference', sample: true, previewScale: 3 }];
 const kindLabel = { mesh: 'Mesh', splat: 'Gaussian splat', points: 'Point cloud' };
 const bytes = n => n == null ? 'Reference asset' : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
 function IconButton({ icon: Icon, label, ...props }) { return <button className="icon-button" title={label} aria-label={label} {...props}><Icon size={17} strokeWidth={1.6} /></button>; }
-function Toggle({ label, checked, onChange, detail }) { return <label className="toggle-row"><span>{label}{detail && <small>{detail}</small>}</span><input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} /><span className="switch" /></label>; }
-function Range({ label, value, onChange, min, max, step = 1, suffix = '' }) { return <label className="range-field"><span>{label}<output>{Number(value).toFixed(step < 0.01 ? 3 : step < 1 ? 2 : 0)}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} /></label>; }
-
 function LightingRig({ settings, onChange }) {
   const custom = settings.lightingPreset === 'custom';
   const change = (key, value) => onChange({ [key]: value, lightingPreset: 'custom', raking: false });
-  const selectPreset = value => onChange(value === 'custom' ? { lightingPreset: 'custom' } : { ...lightingPresets[value], lightingPreset: value, raking: false });
+  const selectPreset = value => onChange(value === 'custom' ? { lightingPreset: 'custom' } : { ...resolveLighting({ lightingPreset: value }), lightingPreset: value, raking: false });
   const flat = settings.lightMode === 'flat', backlight = settings.lightMode === 'backlight';
   return <section className="tool-section lighting-rig" aria-label="Mesh lighting rig">
     <div className="section-title"><h2>Lighting rig</h2><span className="subtle-label">LIVE · MESH</span></div>
     <div className="lighting-preset-row"><select aria-label="Lighting preset" className="lighting-select" value={settings.lightingPreset} onChange={e => selectPreset(e.target.value)}>
       {Object.entries(lightingPresets).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}<option value="custom">Custom</option>
     </select>{!custom && <button className="lighting-adjust" onClick={() => selectPreset('custom')}>Adjust</button>}</div>
-    <p className="lighting-description">{flat ? 'Uniform, shadowless diffuse inspection.' : backlight ? 'Backlight with zero front fill. Follows your view.' : settings.secondaryFill ? 'Opposing keys reveal detail from both sides.' : settings.lightingPreset === 'raking' ? 'Low grazing light reveals surface relief.' : 'Balanced key and ambient surface illumination.'}</p>
+    <p className="lighting-description">{settings.lightSweep ? 'Low-angle light sweeps the surface.' : settings.lightMode === 'spot' ? 'Nearby lamp with distance falloff and an adjustable beam.' : flat ? 'Uniform, shadowless diffuse inspection.' : backlight ? 'Backlight with zero front fill. Follows your view.' : settings.secondaryFill ? 'Opposing keys reveal detail from both sides.' : settings.lightingPreset === 'raking' ? 'Low grazing light reveals surface relief.' : 'Balanced key and ambient surface illumination.'}</p>
     {custom && <div className="lighting-advanced">
       <label className="lighting-mode">Distribution<select className="lighting-select" value={settings.lightMode} onChange={e => {
         const mode = e.target.value;
-        onChange({ ...lightingPresets[mode === 'flat' ? 'flat' : mode === 'backlight' ? 'silhouette' : 'studio'], lightingPreset: 'custom' });
-      }}><option value="directional">Directional</option><option value="flat">Shadowless flat</option><option value="backlight">Backlight</option></select></label>
+        onChange({ ...resolveLighting({ lightingPreset: { flat: 'flat', backlight: 'silhouette', spot: 'softbox' }[mode] || 'studio' }), lightingPreset: 'custom' });
+      }}><option value="directional">Directional</option><option value="spot">Near-field lamp</option><option value="flat">Shadowless flat</option><option value="backlight">Backlight</option></select></label>
       {!flat && <><Range label="Azimuth" value={settings.lightAngle} min={0} max={360} suffix="°" onChange={v => change('lightAngle', v)} />
         <Range label="Elevation" value={settings.lightElevation} min={0} max={90} suffix="°" onChange={v => change('lightElevation', v)} />
-        <Range label="Key intensity" value={settings.lightIntensity} min={0} max={200} suffix="%" onChange={v => change('lightIntensity', v)} /></>}
+        <Range label="Key intensity" value={settings.lightIntensity} min={0} max={200} suffix="%" onChange={v => change('lightIntensity', v)} />
+        <Range label="Shadow softness" value={settings.lightSoftness} min={0} max={100} suffix="%" onChange={v => change('lightSoftness', v)} />
+        {settings.lightMode === 'spot' && <Range label="Lamp distance" value={settings.lightDistance} min={1.2} max={8} step={.1} suffix=" radii" onChange={v => change('lightDistance', v)} />}
+        {!backlight && <><label className="lighting-mode">Light follows<select className="lighting-select" value={settings.lightSpace} onChange={e => change('lightSpace', e.target.value)}><option value="stage">Fixed stage</option><option value="camera">Camera</option></select></label>
+        <Toggle label="Sweep light around specimen" checked={settings.lightSweep} onChange={v => change('lightSweep', v)} /></>}
+      </>}
+      <Range label="Exposure" value={settings.exposure} min={.3} max={2.5} step={.05} suffix="×" onChange={v => change('exposure', v)} />
       {!backlight && <Range label="Ambient fill" value={settings.ambientFill} min={0} max={100} suffix="%" onChange={v => change('ambientFill', v)} />}
       <div className="lighting-temperature"><span>Temperature</span><div className="segmented" role="group" aria-label="Light color temperature">{['warm', 'neutral', 'cool'].map(value => <button key={value} aria-pressed={settings.lightTemperature === value} className={settings.lightTemperature === value ? 'selected' : ''} onClick={() => change('lightTemperature', value)}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div></div>
       {!flat && !backlight && <Toggle label="Opposing fill" detail="Secondary directional light · 65% of key" checked={settings.secondaryFill} onChange={v => change('secondaryFill', v)} />}
@@ -41,7 +48,7 @@ function LightingRig({ settings, onChange }) {
   </section>;
 }
 
-async function readAsset(file, companions) {
+async function readAsset(file, companions, id = crypto.randomUUID(), source = 'Local file') {
   const ext = file.name.split('.').pop().toLowerCase();
   let kind;
   if (ext === 'ply') {
@@ -69,7 +76,7 @@ async function readAsset(file, companions) {
     const url = URL.createObjectURL(blob); objectUrls.push(url);
     const originalUrl = ext === 'gltf' ? URL.createObjectURL(file) : url;
     if (originalUrl !== url) objectUrls.push(originalUrl);
-    return { url, originalUrl, objectUrls, name: file.name, kind, size: file.size, source: 'Local file', importedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
+    return { id, file, companions, url, originalUrl, objectUrls, name: file.name, kind, size: file.size, source, importedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
   } catch (error) { objectUrls.forEach(url => URL.revokeObjectURL(url)); throw error; }
 }
 
@@ -77,7 +84,19 @@ export default function App() {
   const [assets, setAssets] = useState([samples[0], null]);
   const [settings, setSettings] = useState([{ ...defaults }, { ...defaults }]);
   const [active, setActive] = useState(0);
-  const [tab, setTab] = useState('Inspect');
+  const [tab, setTab] = useState('Capture');
+  const [bench, setBench] = useState(samples);
+  const [positions, setPositions] = useState([0, 0]);
+  const [approving, setApproving] = useState(false);
+  const shots0 = useRef(null), shots1 = useRef(null);
+  const shotsRefs = [shots0, shots1];
+  useEffect(() => {
+    let current = true;
+    listScans().then(scans => {
+      if (current) setBench(previous => [...previous, ...scans.filter(scan => !previous.some(item => item.id === scan.id))]);
+    }).catch(() => { if (current) setNotice('Local scan storage is unavailable.'); });
+    return () => { current = false; };
+  }, []);
   const [compare, setCompare] = useState(false);
   const [metadata, setMetadata] = useState([null, null]);
   const [ready, setReady] = useState([false, false]);
@@ -107,7 +126,7 @@ export default function App() {
   const asset = assets[active], current = settings[active];
   const capabilities = metadata[active]?.capabilities || {};
   const canOrtho = asset?.kind === 'mesh' && capabilities.orthographic !== false;
-  const canSpin = asset?.kind !== 'mesh' && capabilities.spin !== false;
+  const canSpin = !!asset && capabilities.spin !== false;
   useEffect(() => {
     if (previousActive.current !== active) {
       (previousActive.current === 0 ? recording0 : recording1).current?.cancel();
@@ -135,16 +154,25 @@ export default function App() {
   useEffect(() => () => assetRef.current.flatMap(a => a?.objectUrls || []).forEach(url => URL.revokeObjectURL(url)), []);
   const update = (key, value) => setSettings(previous => previous.map((s, i) => i === active ? { ...s, [key]: value } : s));
   const updateLighting = patch => setSettings(previous => previous.map((s, i) => i === active ? { ...s, ...patch } : s));
-  const command = useCallback(action => setCommands(previous => previous.map((c, i) => i === active ? { id: ++sequence.current, action } : c)), [active]);
+  const command = useCallback((action, value) => {
+    if (action in shots || ['zero', 'angle', 'step-left', 'step-right'].includes(action)) {
+      setSettings(previous => previous.map((s, i) => i === active ? { ...s, spin: false } : s));
+    }
+    const id = ++sequence.current;
+    setCommands(previous => previous.map((c, i) => i === active ? { id, action, value } : c));
+  }, [active]);
   const install = (next, slot = active) => {
     setAssets(previous => previous.map((a, i) => i === slot ? { ...next } : a));
     setSettings(previous => previous.map((s, i) => i === slot ? { ...defaults, splatScale: next.previewScale || 1 } : s));
     setMetadata(previous => previous.map((m, i) => i === slot ? null : m));
     setReady(previous => previous.map((r, i) => i === slot ? false : r));
     setErrors(previous => previous.map((e, i) => i === slot ? '' : e));
-    setNotice(''); setActive(slot); setTab(compare ? 'Compare' : 'Inspect');
+    setCommands(previous => previous.map((value, i) => i === slot ? null : value));
+    setPositions(previous => previous.map((value, i) => i === slot ? 0 : value));
+    setNotice(''); setActive(slot); setTab(compare && tab !== 'Capture' ? 'Compare' : 'Capture');
   };
   const importFiles = async (fileList, slot = targetRef.current) => {
+    if (busy || isRecording) return;
     const files = Array.from(fileList || []); if (!files.length) return;
     const file = files.find(f => /\.(glb|gltf|ply|splat|ksplat)$/i.test(f.name));
     if (!file) { setNotice('Choose a GLB, GLTF, PLY, SPLAT, or KSPLAT file.'); return; }
@@ -152,40 +180,93 @@ export default function App() {
     try { const next = await readAsset(file, files); install(next, slot); setNotice(`Imported ${next.name}`); } catch (error) { setNotice(error.message); }
     finally { setBusy(false); if (inputRef.current) inputRef.current.value = ''; }
   };
+  const approved = !!asset && bench.some(scan => scan.id === asset.id);
+  const approve = async () => {
+    if (!asset?.file || !ready[active] || approved || approving) return;
+    setApproving(true);
+    const { id, file, companions, name, kind, source } = asset;
+    const record = { id, file, companions, name, kind, source, passedAt: new Date().toISOString() };
+    try {
+      await saveScan(record);
+      setBench(previous => previous.some(scan => scan.id === id) ? previous : [...previous, record]);
+      setNotice(`${name} passed and was added to the bench.`);
+    } catch (error) { setNotice(`Could not add scan to bench: ${error.message}`); }
+    finally { setApproving(false); }
+  };
+  const openScan = async scan => {
+    if (busy || scan.id === asset?.id) return;
+    if (scan.sample) { install(scan); return; }
+    setBusy(true);
+    try { install(await readAsset(scan.file, scan.companions, scan.id, scan.source)); }
+    catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+  const exportShots = async selection => {
+    try {
+      const handler = shotsRefs[active].current;
+      if (!handler) throw new Error('Wait for the specimen to load.');
+      const result = await handler(Object.keys(shots).filter(id => selection.includes(id)));
+      const basename = captureFilename(asset.name, 'png').slice(0, -4);
+      if (result.length === 1) {
+        downloadBlob(result[0].image, `${basename}-${result[0].id}.png`);
+      } else {
+        const archive = {};
+        const manifest = { specimen: asset.name, source: asset.source, appearance: current.appearance, projection: current.orthographic ? 'orthographic' : 'perspective', lighting: resolveLighting(current), shots: [] };
+        for (const { image, ...shot } of result) {
+          const filename = `${shot.id}.png`;
+          archive[filename] = new Uint8Array(await image.arrayBuffer());
+          manifest.shots.push({ ...shot, filename });
+        }
+        archive['shots.json'] = strToU8(JSON.stringify(manifest, null, 2));
+        downloadBlob(new Blob([zipSync(archive, { level: 0 })], { type: 'application/zip' }), `${basename}-shots.zip`);
+      }
+      setNotice(`Saved ${result.length} ${result.length === 1 ? 'shot' : 'shots'}.`);
+    } catch (error) { setNotice(`Shot export failed: ${error.message}`); }
+  };
   const chooseFile = (slot = active) => { targetRef.current = slot; inputRef.current?.click(); };
-  const openMask = async () => {try {const handler=active===0?capture0.current:capture1.current;if(!handler)throw Error('Wait for renderer');setMaskSource(await handler());setTab('Capture')}catch(e){setNotice(e.message)}};
+  const openMask = async () => {
+    try {
+      const handler = captureRefs[active].current;
+      if (!handler) throw new Error('Wait for the renderer.');
+      setMaskSource({ source: await handler(), name: asset?.name });
+    } catch (error) { setNotice(error.message); }
+  };
+  const openProject = async file => {
+    if (!file) return;
+    try {
+      if (file.size > 80 * 1024 * 1024) throw new Error('This annotation project exceeds 80 MB.');
+      const project = validateAnnotationProject(JSON.parse(await file.text()));
+      setMaskSource({ source: project.image, name: project.specimen, initialMarks: project.marks });
+    } catch (error) { setNotice(`Could not open annotations: ${error.message}`); }
+  };
   const capture = useCallback(async () => {
     const handler = active === 0 ? capture0.current : capture1.current;
     if (!handler) { setNotice('Wait for the renderer to finish loading before capturing.'); return; }
     try {
       const dataURL = await handler();
-      const link = document.createElement('a');
-      link.href = dataURL;
-      link.download = captureFilename(assets[active]?.name, 'png');
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      download(dataURL, captureFilename(assets[active]?.name, 'png'));
       setNotice('PNG capture saved.');
     } catch (error) { setNotice(`Capture failed: ${error.message}`); }
   }, [active, assets]);
   useEffect(() => {
     const listener = e => {
-      if (/INPUT|SELECT|TEXTAREA/.test(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (maskSource || /INPUT|SELECT|TEXTAREA|BUTTON/.test(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.toLowerCase() === 'f') command('reset');
       if (e.key.toLowerCase() === 's') { e.preventDefault(); capture(); }
       if (e.key === ' ' && canSpin) { e.preventDefault(); setSettings(previous => previous.map((s, i) => i === active ? { ...s, spin: !s.spin } : s)); }
       if (e.key === '1') command('front'); if (e.key === '3') command('right'); if (e.key === '7') command('top');
     };
     window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener);
-  }, [active, capture, command, canSpin]);
+  }, [active, capture, command, canSpin, maskSource]);
   const onReady = useCallback((slot, info) => { setMetadata(p => p.map((m, i) => i === slot ? info : m)); setReady(p => p.map((r, i) => i === slot ? true : r)); setErrors(p => p.map((e, i) => i === slot ? '' : e)); }, []);
   const onError = useCallback((slot, error) => { setErrors(p => p.map((e, i) => i === slot ? String(error) : e)); setReady(p => p.map((r, i) => i === slot ? false : r)); }, []);
+  const surface = asset && <section className="tool-section"><h2>Surface display</h2>{asset.kind === 'mesh' ? <div className="segmented">{[['original', 'Texture'], ['clay', 'Neutral'], ['wireframe', 'Wire']].map(([value, label]) => <button key={value} aria-pressed={current.appearance === value} className={current.appearance === value ? 'selected' : ''} onClick={() => update('appearance', value)}>{label}</button>)}</div> : asset.kind === 'splat' ? <><Toggle label="Point cloud" detail="Inspect Gaussian centers" checked={current.pointCloud} onChange={v => update('pointCloud', v)} /><Range label="Splat scale" min={0.1} max={5} step={0.05} value={current.splatScale} suffix="×" onChange={v => update('splatScale', v)} /></> : <Range label="Point size" min={0.1} max={20} step={0.1} suffix=" px" value={current.pointSize} onChange={v => update('pointSize', v)} />}</section>;
   return <div className={`app-shell ${busy ? 'is-importing' : ''}`}>
-    {maskSource && <MaskEditor source={maskSource} name={assets[active]?.name} onClose={()=>setMaskSource(null)}/>}
+    {maskSource && <MaskEditor {...maskSource} onClose={() => setMaskSource(null)} />}
     <input ref={inputRef} type="file" multiple accept=".glb,.gltf,.ply,.splat,.ksplat,.bin,.png,.jpg,.jpeg,.webp,.ktx2" hidden onChange={e => importFiles(e.target.files)} />
     <header className="app-header">
       <a className="brand" href="#" onClick={e => e.preventDefault()} aria-label="House of Mac home"><span className="brand-symbol"><Box size={23} strokeWidth={1.4} /></span><span>HOUSE OF MAC<span className="brand-version">2.0 / FIELD STUDIO</span></span></a>
-      <nav aria-label="Workspace">{[{ label: 'Import', icon: FolderOpen }, { label: 'Inspect', icon: ScanLine }, { label: 'Compare', icon: ArrowLeftRight }, { label: 'Capture', icon: Camera }].map(({ label, icon: Icon }) => <button key={label} className={tab === label ? 'nav-item selected' : 'nav-item'} onClick={() => setTab(label)}><Icon size={16} /><span>{label}</span></button>)}</nav>
+      <nav aria-label="Workspace">{[{ label: 'Import', icon: FolderOpen }, { label: 'Inspect', icon: ScanLine }, { label: 'Compare', icon: ArrowLeftRight }, { label: 'Capture', icon: Camera }].map(({ label, icon: Icon }) => <button key={label} className={tab === label ? 'nav-item selected' : 'nav-item'} onClick={() => setTab(label)}><Icon size={16} /><span>{label === 'Capture' ? 'Workbench' : label}</span></button>)}</nav>
       <button className="header-import" onClick={() => chooseFile()} disabled={busy}><Plus size={16} /><span>{busy ? 'Reading…' : 'Import file'}</span></button>
     </header>
     <div className="workspace">
@@ -194,18 +275,18 @@ export default function App() {
         <div className="viewports">{(compare ? [0, 1] : [active]).map(slot => <section key={slot} className={`viewport ${active === slot ? 'active-view' : ''}`} onPointerDown={() => setActive(slot)} aria-label={`Viewport ${slot + 1}`}>
           {assets[slot] ? <>
             <div className="viewport-label"><span className="view-index">{String(slot + 1).padStart(2, '0')}</span><span>{assets[slot].name}</span><span className="type-label">{kindLabel[assets[slot].kind]}</span></div>
-            <div className="renderer"><Viewer key={assets[slot].url} asset={assets[slot]} settings={settings[slot]} cameraCommand={commands[slot]} captureRef={captureRefs[slot]} recordingRef={recordingRefs[slot]} onRecordingChange={onRecordingChange} onReady={info => onReady(slot, info)} onError={error => onError(slot, error)} /></div>
+            <div className="renderer"><Viewer key={assets[slot].url} asset={assets[slot]} settings={settings[slot]} cameraCommand={commands[slot]} captureRef={captureRefs[slot]} shotsRef={shotsRefs[slot]} onCameraChange={info => setPositions(previous => previous[slot] === info.tableAngle ? previous : previous.map((value, i) => i === slot ? info.tableAngle : value))} recordingRef={recordingRefs[slot]} onRecordingChange={onRecordingChange} onReady={info => onReady(slot, info)} onError={error => onError(slot, error)} /></div>
             {!ready[slot] && !errors[slot] && <div className="loading-overlay"><span className="loading-line" />Preparing specimen</div>}
             {errors[slot] && <div className="viewer-error"><Box size={25} /><strong>Unable to render this file</strong><p>{errors[slot]}</p><button onClick={() => chooseFile(slot)}>Choose another file</button></div>}
             <div className="viewport-bottom"><span>{settings[slot].orthographic && assets[slot].kind === 'mesh' ? 'ORTHOGRAPHIC' : 'PERSPECTIVE'}</span><span>{settings[slot].spin ? 'TURNTABLE ACTIVE' : 'ORBIT / FREE'}</span></div>
           </> : <div className="empty-view"><div className="empty-icon"><Plus size={25} strokeWidth={1} /></div><h2>A second perspective.</h2><p>Open another scan to compare geometry,<br />surface detail, or capture methods.</p><button className="primary-button" onClick={() => chooseFile(slot)}><FolderOpen size={16} />Import comparison</button><button className="text-button" onClick={() => install(samples[1], slot)}>Use Gaussian reference <ArrowUpRight size={14} /></button></div>}
         </section>)}</div>
         {dragging && <div className="drop-overlay"><Upload size={30} /><strong>Drop to inspect</strong><span>Your original stays on this device.</span></div>}
-        <div className="stage-toolbar"><div><IconButton icon={Crosshair} label="Fit specimen (F)" onClick={() => command('reset')} /><IconButton icon={RotateCcw} label="Rotate camera left" onClick={() => command('step-left')} />{canOrtho && <IconButton icon={Move3D} label={current.orthographic ? 'Use perspective projection' : 'Use orthographic projection'} aria-pressed={current.orthographic} onClick={() => update('orthographic', !current.orthographic)} />}</div>{canSpin && <><span className="toolbar-divider" /><button className={`toolbar-spin ${current.spin ? 'on' : ''}`} onClick={() => update('spin', !current.spin)} aria-pressed={current.spin} title="Turntable (Space)"><span className="spin-indicator" />Turntable</button></>}<span className="toolbar-divider" /><IconButton icon={Camera} label="Save PNG (S)" onClick={capture} disabled={!ready[active]} /></div>
-        <div className="navigation-hint"><MousePointer2 size={12} /><span>Drag to orbit<span className="hint-extra"> · Right-drag to pan · Scroll to zoom</span></span></div>
+        <div className="stage-toolbar"><div><IconButton icon={Crosshair} label="Fit specimen (F)" onClick={() => command('reset')} /></div></div>
+        <div className="navigation-hint"><MousePointer2 size={12} /><span>Drag to orbit camera<span className="hint-extra"> · Right-drag to pan · Scroll to zoom</span></span></div>
       </main>
       <aside className="tool-panel" aria-label={`${tab} tools`}>
-        <div className="panel-heading"><span className="eyebrow">{tab === 'Inspect' ? 'INSPECTION TOOLS' : `${tab.toUpperCase()} WORKSPACE`}</span><Settings2 size={15} /></div>
+        <div className="panel-heading"><span className="eyebrow">{tab === 'Inspect' ? 'INSPECTION TOOLS' : `${tab === 'Capture' ? 'WORKBENCH' : tab.toUpperCase() + ' WORKSPACE'}`}</span><Settings2 size={15} /></div>
         <div className="panel-content">
           {tab === 'Import' ? <>
             <div className="section-intro"><h1>Bring a scan into focus.</h1><p>Open an original capture. Inspect it locally with tools matched to its format.</p></div>
@@ -219,29 +300,14 @@ export default function App() {
             <p className="info-note">Cameras are independent. Each view preserves its own display settings; scale and alignment are not assumed.</p>
             <button className="secondary-button full-width" onClick={() => setTab('Inspect')}><Settings2 size={15} />Inspect selected view</button>
           </> : tab === 'Capture' ? <>
-            <div className="section-intro"><h1>Keep the observation.</h1><p>Save the selected viewport at its current rendering resolution.</p></div>
-            <div className="capture-summary"><Image size={28} strokeWidth={1.2} /><span>PNG image<small>{compare ? `Viewport 0${active + 1}` : 'Current viewport'} · Current camera</small></span></div>
-            <button className="primary-button full-width" disabled={!ready[active]} onClick={capture}><ArrowDownToLine size={16} />Save screenshot<kbd>S</kbd></button>
-            <button className="secondary-button full-width" disabled={!ready[active]} onClick={openMask}>Magnetic outline / annotation mask</button>
-            <section className="tool-section" aria-label="Turntable controls"><h2>Turntable · live preview</h2><Toggle label="Rotate model" checked={current.spin} onChange={v => update('spin',v)} /><div className="segmented" role="group" aria-label="Turntable direction"><button className={current.spinDirection===-1 ? 'selected' : ''} onClick={()=>update('spinDirection',-1)}>Reverse</button><button className={current.spinDirection===1 ? 'selected' : ''} onClick={()=>update('spinDirection',1)}>Forward</button></div><Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v=>update('speed',v)} /><button className="secondary-button full-width" onClick={()=>update('spin',false)}>Pause rotation</button><p className="quiet-note">Works without recording. Speed and direction remain adjustable during recording.</p></section>
-            <section className="tool-section video-capture" aria-label="WebM video recording">
-              <div className="section-title"><h2>WebM video</h2><span className={`recording-timer ${isRecording ? 'running' : ''}`} role="timer" aria-label="Recording elapsed time">{elapsedLabel}</span></div>
-              <label className="video-fps">Frame rate<select className="lighting-select" value={fps} disabled={isRecording} onChange={e => setFps(Number(e.target.value))}>{[15, 24, 30].map(value => <option key={value} value={value}>{value} FPS</option>)}</select></label>
-              <fieldset className="video-options" disabled={isRecording}><Toggle label="Auto-turntable" checked={autoTurntable} onChange={setAutoTurntable} /></fieldset>
-              
-              {isRecording ? <button className="secondary-button full-width recording-stop" disabled={recording.status === 'stopping'} onClick={() => recordingRefs[active].current?.stop()}>{recording.status === 'stopping' ? 'Finishing WebM…' : 'Stop & save WebM'}</button> : <button className="primary-button full-width" disabled={!ready[active] || !videoSupported} onClick={startRecording}>Start WebM recording</button>}
-              {!videoSupported && <p className="capture-error" role="alert">This browser does not support canvas recording with WebM. Try a browser with MediaRecorder and WebM support.</p>}
-              {recordingError && <p className="capture-error" role="alert">{recordingError}</p>}
-              <p className="quiet-note">Local recording only · No upload. Keep this tab visible while recording. Changing specimens or viewports cancels the recording.</p>
-            </section>
-            <section className="tool-section"><h2>Frame the specimen</h2><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{canSpin && <Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}</section>
-            <p className="info-note">The image records the rendered view. Original geometry and source files are never modified.</p>
+            <Workbench {...{ asset, bench, openScan, approve, approved, current, update, command, canOrtho, surface, capture, exportShots, openMask, openProject }}
+              canApprove={!!asset?.file} position={positions[active]} ready={ready[active] && !busy && !approving}
+              lighting={asset?.kind === 'mesh' ? <LightingRig settings={current} onChange={updateLighting} /> : <p className="info-note">Studio relighting requires a mesh. This scan displays its captured colors.</p>}
+              video={{ active: isRecording, stopping: recording.status === 'stopping', supported: videoSupported, fps, setFps, autoTurntable, setAutoTurntable, elapsed: elapsedLabel, start: startRecording, stop: () => recordingRefs[active].current?.stop(), error: recordingError }} />
           </> : <>
             <div className="asset-summary"><div className="section-title"><span className="mode-tag">{kindLabel[asset?.kind] || 'No asset'}</span><span className="subtle-label">VIEW 0{active + 1}</span></div><h1 title={asset?.name}>{asset?.name || 'Open a specimen'}</h1><span className="asset-meta">{bytes(asset?.size)}<span>·</span>{asset?.source}</span></div>
             {asset && <>
-              <section className="tool-section"><h2>Surface display</h2>{asset.kind === 'mesh' ? <><div className="segmented">{[['original', 'Texture'], ['clay', 'Neutral'], ['wireframe', 'Wire']].map(([value, label]) => <button key={value} aria-pressed={current.appearance === value} className={current.appearance === value ? 'selected' : ''} onClick={() => update('appearance', value)}>{label}</button>)}</div></> : asset.kind === 'splat' ? <><Toggle label="Point cloud" detail="Inspect Gaussian centers" checked={current.pointCloud} onChange={v => update('pointCloud', v)} /><Range label="Splat scale" min={0.1} max={5} step={0.05} value={current.splatScale} suffix="×" onChange={v => update('splatScale', v)} /></> : <Range label="Point size" min={0.1} max={20} step={0.1} suffix=" px" value={current.pointSize} onChange={v => update('pointSize', v)} />}</section>
-              {asset.kind === 'mesh' && <LightingRig settings={current} onChange={updateLighting} />}
-              <section className="tool-section"><div className="section-title"><h2>Camera</h2><button className="inline-action" onClick={() => command('reset')}>Fit <kbd>F</kbd></button></div><CameraViews command={command} />{canOrtho && <Toggle label="Orthographic" checked={current.orthographic} onChange={v => update('orthographic', v)} />}{<Toggle label="Turntable" checked={current.spin} onChange={v => update('spin', v)} />}{current.spin && <Range label="Rotation speed" min={0.05} max={1} step={0.05} value={current.speed} onChange={v => update('speed', v)} />}</section>
+              <button className="secondary-button full-width" onClick={() => setTab('Capture')}><Camera size={15} />Open workbench</button>
               {asset.kind === 'mesh' && <section className="tool-section"><h2>Section plane</h2><Toggle label="Clip geometry" checked={current.clipEnabled} onChange={v => update('clipEnabled', v)} />{current.clipEnabled && <Range label="Plane offset" min={-1} max={1} step={0.01} value={current.clipOffset} onChange={v => update('clipOffset', v)} />}</section>}
               <section className="tool-section provenance"><h2>Source & integrity</h2><dl><div><dt>Source</dt><dd>{asset.sample ? asset.source : <select aria-label="File provenance" className="source-select" value={asset.source} onChange={e => setAssets(previous => previous.map((a, i) => i === active ? { ...a, source: e.target.value } : a))}><option>Local file</option><option>KIRI Engine export</option></select>}</dd></div><div><dt>Format</dt><dd>{asset.name.split('.').pop().toUpperCase()}</dd></div>{metadata[active]?.vertices != null && <div><dt>{asset.kind === 'mesh' ? 'Vertices' : 'Points'}</dt><dd>{Number(metadata[active].vertices).toLocaleString()}</dd></div>}{metadata[active]?.faces != null && <div><dt>Faces</dt><dd>{Number(metadata[active].faces).toLocaleString()}</dd></div>}</dl><p><Check size={12} />Original file preserved</p><a className="original-download" href={asset.originalUrl || asset.url} download={asset.name}><ArrowDownToLine size={12} />Download original</a><span className="quiet-note">Uncalibrated capture. Physical dimensions cannot be inferred.</span></section>
             </>}
@@ -254,4 +320,3 @@ export default function App() {
     {notice && <div className="toast" role="status"><span>{notice}</span><IconButton icon={X} label="Dismiss notification" onClick={() => setNotice('')} /></div>}
   </div>;
 }
-function CameraViews({ command }) { return <div className="camera-views">{['front', 'back', 'left', 'right', 'top', 'bottom'].map(view => <button key={view} onClick={() => command(view)}>{view[0].toUpperCase() + view.slice(1)}</button>)}</div>; }

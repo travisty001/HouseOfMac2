@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createViewer } from './runtime.js';
 
 /** One local WebGL context. The parent must provide a nonzero height. */
-export default function Viewer({ asset, settings = {}, onReady, onError, onCameraChange, onRecordingChange, cameraCommand, captureRef, recordingRef }) {
+export default function Viewer({ asset, settings = {}, onReady, onError, onCameraChange, onRecordingChange, cameraCommand, captureRef, shotsRef, recordingRef }) {
   const host = useRef(null);
   const runtime = useRef(null);
   const latest = useRef({ settings, onReady, onError, onCameraChange, onRecordingChange, cameraCommand });
@@ -36,6 +36,15 @@ export default function Viewer({ asset, settings = {}, onReady, onError, onCamer
     captureRef.current = capture;
     return () => { if (captureRef.current === capture) captureRef.current = null; };
   }, [captureRef]);
+  useEffect(() => {
+    if (!shotsRef) return undefined;
+    const capture = selection => {
+      if (!runtime.current) return Promise.reject(new Error('No asset is ready for capture.'));
+      return runtime.current.captureShots(selection);
+    };
+    shotsRef.current = capture;
+    return () => { if (shotsRef.current === capture) shotsRef.current = null; };
+  }, [shotsRef]);
   useEffect(() => {
     if (!recordingRef) return undefined;
     const api = {
