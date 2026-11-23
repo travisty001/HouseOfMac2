@@ -300,13 +300,13 @@ export function createViewer(host, asset, latest, restore) {
     if (dead) return;
     frame = requestAnimationFrame(tick);
     const interval = recording ? 1000 / recording.fps : 32;
-    if (!ready || lost || !visible || document.hidden || time - lastDraw < interval - (recording ? 1 : 0)) return;
+    if (!ready || lost || !visible || document.hidden || time - lastDraw < interval) return;
     const delta = Math.min((time - lastTime) / 1000 || 0, .1);
     lastTime = time;
     // Carry the remainder so 24 FPS does not fall to 20 on a 60 Hz display.
-    lastDraw = recording ? time - Math.max(0, (time - lastDraw) % interval) : time;
-    if (recording ? recording.turntable : settings.spin && asset.kind !== 'mesh') {
-      offset.copy(camera.position).sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * bounded(settings.speed, 1, -10, 10) * .3);
+    lastDraw = recording ? time - (time - lastDraw) % interval : time;
+    if (settings.spin || (recording && recording.turntable)) {
+      offset.copy(camera.position).sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), delta * bounded(settings.speed, 1, 0.05, 10) * (settings.spinDirection === -1 ? -1 : 1) * .3);
       camera.position.copy(controls.target).add(offset);
       camera.lookAt(controls.target);
       dirty = true;
